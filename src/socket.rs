@@ -9,45 +9,44 @@ use crate::settings::Settings;
 
 pub fn resolve_dns(settings: &Settings) -> Option<(IpAddr, SocketAddr)> {
     info!("DNS resolving...");
-    let mut r: Option<(IpAddr, SocketAddr)> = None;
-    for address in &settings.dns {
-        let mut config = ResolverConfig::new();
-        config.add_name_server(NameServerConfig {
-            socket_addr: *address,
-            protocol: Protocol::Udp,
-            tls_dns_name: None,
-            trust_negative_responses: false,
-            bind_addr: None,
-        });
-        info!("Use DNS: {}:{}", address.ip(), address.port());
-        let resolver = match Resolver::new(config, ResolverOpts::default()) {
-            Ok(r) => r,
-            Err(_) => {
-                error!("Failed to connect resolver.");
-                continue;
+    let r = settings
+        .dns
+        .iter()
+        .filter_map(|address| {
+            let mut config = ResolverConfig::new();
+            config.add_name_server(NameServerConfig {
+                socket_addr: *address,
+                protocol: Protocol::Udp,
+                tls_dns_name: None,
+                trust_negative_responses: false,
+                bind_addr: None,
+            });
+            info!("Use DNS: {}:{}", address.ip(), address.port());
+            let resolver = match Resolver::new(config, ResolverOpts::default()) {
+                Ok(r) => r,
+                Err(_) => {
+                    error!("Failed to connect resolver.");
+                    return None;
+                }
+            };
+            let lookup = match resolver.lookup_ip(&settings.host) {
+                Ok(r) => r,
+                Err(_) => {
+                    error!("Failed to lookup.");
+                    return None;
+                }
+            };
+            if let Some(ip) = lookup.iter().next() {
+                Some((ip, *address))
+            } else {
+                error!("No addresses returned!");
+                None
             }
-        };
-        let lookup = match resolver.lookup_ip(&settings.host[..]) {
-            Ok(r) => r,
-            Err(_) => {
-                error!("Failed to lookup.");
-                continue;
-            }
-        };
-        for ip in lookup {
-            if r.is_some() {
-                break;
-            }
-            r = Some((ip, *address));
-        }
-        if r.is_some() {
-            break;
-        }
-        error!("No addresses returned!");
-    }
+        })
+        .next();
     info!("Resolve result:");
-    if r.is_some() {
-        info!("IP: {}", &r.unwrap().0);
+    if let Some(r1) = r {
+        info!("IP: {}", &r1.0);
     } else {
         error!("Resolve failed.");
     }
