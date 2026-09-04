@@ -36,7 +36,7 @@ pub fn get_all_interfaces() -> Vec<NetworkInterface> {
 
 pub fn get_device(mac: Option<MacAddr>, ip: Option<IpAddr>) -> Result<Device> {
     if let Some(m) = mac {
-        return Device::from_mac(m);
+        return Device::from_mac(m, ip);
     }
     if let Some(ip) = ip {
         return Device::from_ip(ip);
@@ -45,13 +45,26 @@ pub fn get_device(mac: Option<MacAddr>, ip: Option<IpAddr>) -> Result<Device> {
 }
 
 impl Device {
-    pub fn from_mac(mac: MacAddr) -> Result<Device> {
+    pub fn from_mac(mac: MacAddr, ip: Option<IpAddr>) -> Result<Device> {
         let interface = filter_interface(|e| match e.mac {
             Some(ref m) => *m == mac,
             None => false,
         });
         match interface {
-            Some(interface) => Device::new(interface),
+            Some(interface) => match ip {
+                Some(ip) => {
+                    let ip_net = interface
+                        .ips
+                        .iter()
+                        .find(|i| i.ip() == ip)
+                        .copied()
+                        .unwrap_or_else(|| {
+                            IpNetwork::new(ip, if ip.is_ipv4() { 32 } else { 128 }).unwrap()
+                        });
+                    Device::with_ip_net(interface, ip_net)
+                }
+                None => Device::new(interface),
+            },
             None => Err(Error::new(
                 ErrorKind::NotFound,
                 format!("Can't get interface which MAC address is {mac}."),
@@ -152,7 +165,7 @@ impl Device {
 #[ignore]
 fn test_device() {
     println!("{:?}", Device::default().unwrap().mac);
-    assert!(Device::from_mac(MacAddr::new(0, 0, 0, 0, 0, 0)).is_err());
+    assert!(Device::from_mac(MacAddr::new(0, 0, 0, 0, 0, 0), None).is_err());
     println!(
         "{:?}",
         Device::from_ip(IpAddr::from([125, 217, 254, 225]))
