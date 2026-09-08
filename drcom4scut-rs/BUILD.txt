@@ -1,0 +1,16 @@
+Windows GUI release 0.3.1
+
+Build the GUI/installer with drcom4scut-rs/publish-setup.ps1.
+Rust: nightly-2026-09-06-x86_64-pc-windows-gnu; explicit target x86_64-pc-windows-gnu.
+GNU windres and ar must be available on PATH. Use ASCII-only build/payload directories.
+The script accepts -BuildDirectory and -PayloadDirectory to override defaults.
+
+Embedded core corresponding source:
+drcom4scut_0.3.1/vendor/drcom4scut-0.3.2
+Core build script: drcom4scut_0.3.1/build-core.ps1
+Create drcom4scut_0.3.1/src/Resources before running the core script.
+The script downloads and verifies Npcap SDK 1.15, compiles core 0.3.2, and validates --version and SHA256.
+Copy the verified src/Resources/drcom4scut.exe into drcom4scut-rs/resources/drcom4scut.exe.
+Core SHA256: ce79e117d14d172cb172a7d2a8adb2c638eb32d952db28d8ce04602eb5445ec2
+Core version remains 0.3.2 to preserve accurate upstream provenance. GUI/release version is 0.3.1.
+See core PATCHES.md for the two credential-handling patches.

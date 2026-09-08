@@ -1,0 +1,11 @@
+校园网认证客户端（drcom4scutGUI）0.3.1
+
+本安装包含：
+- drcom4scutGUI 及其原生安装器/卸载器（GPL-3.0-or-later）
+- 嵌入的认证核心 drcom4scut 0.3.2（上游许可声明存在 GPL/LGPL 冲突，分发按 GPL-3.0-or-later 保守处理）
+- Lucide 图标（ISC，见 lucide-LICENSE）
+- windows / serde / sha2 / resvg 等 Rust 依赖（MIT / Apache-2.0 / MPL 等，见对应 crate）
+
+未购买 Npcap OEM 许可，本产品不内嵌、不再分发 Npcap 安装包。
+安装器仅可在用户同意后从 npcap.com / nmap.org 官方 HTTPS 下载固定版本，
+核验哈希与签名后启动官方交互安装程序。免费版不能静默安装。

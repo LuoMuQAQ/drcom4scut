@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Preserve exact corresponding source and embedded resource bytes across checkout.
+drcom4scut-rs/** -text
+drcom4scut_0.3.1/** -text

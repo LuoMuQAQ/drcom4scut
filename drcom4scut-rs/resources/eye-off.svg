@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none">
+  <!-- Lucide eye-off, ISC license. -->
+  <g stroke="#616161" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="m2 2 20 20"/>
+    <path d="M10.584 10.587a2 2 0 0 0 2.828 2.828M9.363 5.365A10.8 10.8 0 0 1 12 5c4.5 0 8.268 2.943 9.938 6.652a1 1 0 0 1 0 .696 11.8 11.8 0 0 1-2.1 3.04M6.343 6.343a11.8 11.8 0 0 0-4.281 5.309 1 1 0 0 0 0 .696C3.732 16.057 7.5 19 12 19a10.8 10.8 0 0 0 5.657-1.657"/>
+  </g>
+</svg>

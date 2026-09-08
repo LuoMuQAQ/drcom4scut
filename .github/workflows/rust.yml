@@ -1,5 +1,9 @@
 name: Rust
-on: [push, pull_request]
+on:
+  push:
+    paths: ["src/**", "Cargo.toml", "Cargo.lock", ".github/workflows/rust.yml"]
+  pull_request:
+    paths: ["src/**", "Cargo.toml", "Cargo.lock", ".github/workflows/rust.yml"]
 env:
   CARGO_TERM_COLOR: always
   NPCAP_SDK_URL: "https://npcap.com/dist/npcap-sdk-1.15.zip"

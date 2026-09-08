@@ -10,3 +10,15 @@ config.yml
 #project
 Packet.lib
 .vscode
+
+# Windows GUI generated artifacts and private runtime data
+**/target/
+**/release/
+**/logs/
+**/data/
+**/.install-staging/
+**/settings*.dat
+**/gui.json
+**/install-state.json
+*.bak-upgrade
+*.zip

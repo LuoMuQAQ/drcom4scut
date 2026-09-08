@@ -1,127 +1,47 @@
-# drcom4scut
+# drcom4scut Windows GUI 0.3.1
 
-> 当前版本  0.3.0
+基于 [SeaLoong/drcom4scut](https://github.com/SeaLoong/drcom4scut) 的 Windows 原生图形客户端，使用 Rust / Win32 编写。本项目是独立维护的 GUI fork，感谢原作者提供认证核心。
 
-+ A 3rd-party DrCOM client for SCUT, written in Rust.
-+ 华南理工大学第三方客户端，使用Rust语言编写。
+## 下载和安装
 
----
+前往 [Releases](https://github.com/LuoMuQAQ/drcom4scut/releases/latest)，下载 **drcom4scut-Setup-0.3.1.exe** 安装版。默认安装到 64 位 Program Files，可自行选择本地目录；已安装时在原目录覆盖升级。
 
-## 用法
+也提供 **drcom4scutGUI-0.3.1.exe** 单文件便携版，需要系统已有兼容 x64 Npcap / WinPcap 驱动。便携模式数据位于 `%LOCALAPPDATA%/drcom4scutGUI`。
 
-> 仅供不熟悉操作的同学参考，熟悉的话直接看命令行参数和配置项应该就知道怎么用了
+安装器自动检测兼容 x64 Npcap / WinPcap。缺少时从官网下载 Npcap 1.88，核验 SHA-256 与 Authenticode 后启动官方安装窗口。免费 Npcap 需要在官方窗口确认许可和安装，不能全静默安装；本项目不内嵌或再分发 Npcap 安装包。
 
-1. 下载 Release 并解压。
-2. 如在Windows系统，安装[npcap](https://npcap.com/#download)
-3. 运行 drcom4scut，第一次会产生配置文件。
-4. 填写配置文件，通常只需要填写 `username` 和 `password` 两项（注意yml文件格式）。
-5. 再次运行 drcom4scut，通常是可以正常运行的。
-   + 如果不能，请查看控制台输出的提示。
-     + 如果没有自动选择正确的网卡，请在配置文件中填写 `mac` 或 `ip` 任意一项。其中 `mac` 是以冒号分隔的形式， `ip` 是你指定网卡对应设置的IP地址。
-     + 如果出现不能读取配置文件，请检查填写的配置文件是否满足yml规范。
+## 功能
 
----
+- 原生中文界面、网卡选择、托盘运行、SVG 密码显示/隐藏图标。
+- 客户端默认申请管理员权限，可配置以最高权限运行的登录自启计划任务。
+- 核心内部自动恢复，外层提供停滞检测和退避；正常心跳和夜间定时等待不会被周期重启。
+- 密码设置使用 Windows DPAPI 保护，凭据通过子进程环境传入核心，不放在命令行中；核心不会在启动日志中输出密码。
+- 安装版核心、设置及日志位于安装目录的 `runtime` 和 `data/users/<Windows SID>`。
+- 原生卸载器、Windows 卸载入口和开始菜单快捷方式；卸载清理本安装的数据，保留共享驱动。
+- 安装与卸载共用维护锁；校验产品身份、清理路径和重解析点；清理失败保留重试入口。
 
-## 命令行参数
+## 版本与来源
 
-```bash
-Usage: drcom4scut.exe [OPTIONS]
+Windows GUI / 安装包的公开版本号从 **0.3.1** 开始，与上游最新 Release 编号对齐。Release 标记使用 **windows-v0.3.1**，避免与保留的上游 `v0.3.1` 标记混淆。
 
-Options:
-  -c, --config <config>      Path to config file. [default: config.yml]
-  -D, --debug                Enable debug mode.
-  -m, --mac <mac>            Ethernet Device MAC address.
-  -i, --ip <ip>              IP address of the selected Ethernet Device.
-  -u, --username <username>  Username to authorize.
-  -p, --password <password>  Password to authorize.
-  -H, --host <host>          Host to connect UDP server. Default value is 's.scut.edu.cn'.
-  -N, --hostname <hostname>  Default value is current computer host name.
-  -t, --time <time>          Time to reconnect automatically after you are not allowed to access Internet. Default value is 7:00.
-  -h, --help                 Print help
-  -V, --version              Print version
+内嵌认证核心基于上游提交 `ef20ae5c71744eb9e096f5e586713490ba01f4ee`（核心自身版本 0.3.2），仅加入环境变量凭据和移除密码日志两项补丁。核心保持真实版本号，与 GUI 的发行版本独立；见 `drcom4scut_0.3.1/vendor/drcom4scut-0.3.2/PATCHES.md`。
+
+## 构建
+
+要求 Windows x64、Rust `nightly-2026-09-06-x86_64-pc-windows-gnu`、GNU MinGW `windres` / `ar` 在 PATH 中。构建输出目录需使用纯 ASCII 路径。
+
+```powershell
+cd drcom4scut-rs
+$env:CARGO_TARGET_DIR = Join-Path $env:TEMP 'drcom4scut-rs-target'
+cargo +nightly-2026-09-06-x86_64-pc-windows-gnu test --target x86_64-pc-windows-gnu
+cargo +nightly-2026-09-06-x86_64-pc-windows-gnu fmt --all -- --check
+powershell -NoProfile -ExecutionPolicy Bypass -File .\publish-setup.ps1
 ```
 
----
+临时目录含非 ASCII 字符时，向发布脚本传入 `-BuildDirectory C:\drcom-build -PayloadDirectory C:\drcom-payload`。安装包在 `drcom4scut-rs/release/setup`，GUI 在 `drcom4scut-rs/release`。内嵌核心的对应源码和可复现构建说明见 `drcom4scut-rs/BUILD.txt`。
 
-## 配置项
-
-```yml
-mac:   # (可选)网卡MAC地址，以冒号':'分隔
-ip:   # (可选)网卡对应设置的IP地址
-username: ''  # 账号（学号）
-password: ''  # 密码
-dns:   # 学校DNS服务器IP地址，默认已填入五山校区和大学城校区的DNS
-  - 202.38.193.33
-  - 222.201.130.30
-  - 202.112.17.33
-  - 222.201.130.33
-host: s.scut.edu.cn   # (可选) 用于UDP连接的地址，通常不需要改动
-hostname:   # (可选) 主机名，留空会使用当前电脑的主机名
-time: 7:00   # (可选) 在收到“本时段禁止上网”后的重连时间，默认为7点整
-reconnect: 15   # (可选) 出现意外情况时的重连间隔，默认为15秒
-heartbeat:
-  eap_timeout: 60   # (可选) EAP连接心跳间隔，默认为60秒
-  udp_timeout: 12   # (可选) UDP连接心跳间隔，默认为12秒
-retry:
-  count: 2   # (可选) 错误重试次数
-  interval: 5000   # (可选) 数据包重发间隔、错误重试间隔，默认为5000毫秒
-log:
-  enable_console: false   # (可选) 是否输出日志到控制台
-  enable_file: false   # (可选) 是否输出日志到文件
-  file_directory: ./logs   # (可选) 日志文件目录
-  level: INFO   # (可选) 日志等级
-data:   # (可选) 以下参数通常不需要填写，填写错误可能会导致不可预计的问题
-  response_identity:
-    unknown:
-  response_md5_challenge:
-    unknown:
-  misc_info:
-    unknown1:
-    cks32_param:
-    unknown2:
-    os_major:
-    os_minor:
-    os_build:
-    os_unknown:
-    version:
-    hash:
-```
-
----
-
-## 构建和编译
-
-### 一般构建
-
-```bash
-cargo build --release
-```
-
-+ 如果你想去掉更好的日志功能而使用最简单的控制台日志，可以禁用 `log4rs` 特性
-
-  ```bash
-  cargo build --release --no-default-features
-  ```
-+ 需要使用 *Nightly* 版本的 Rust 进行编译。
-+ 由于使用了 [**libpnet**](https://crates.io/crates/pnet) ，在Windows下需要安装 *WinPcap* 或 *pcap* 才能进行编译，详见[**libpnet**](https://crates.io/crates/pnet)。
-+ 目前在 Windows/Ubuntu(感谢hyh) 下编译通过，其余环境暂未测试。
-
-### 自动构建
-+ 已经为Ubuntu和Windows自动构建了最新版本的drcom4scut，如有需要请从GitHub Action下载。如果文件过期可以自己fork后构建。
-### OpenWRT
-
-+ 由于并没有了解这方面，待补充。
-
----
+验证：150 项自动测试通过，1 项需官方下载及证书信任的网络测试默认忽略。实际登录自启、UAC、驱动安装和断线恢复仍依赖运行环境；发行 EXE 未代码签名。
 
 ## 许可证
 
-[![LGPLv3](https://img.shields.io/badge/License-LGPLv3-blue.svg?longCache=true)](https://github.com/SeaLoong/drcom4scut/blob/master/LICENSE)
-
----
-
-## 鸣谢
-
-+ hyh
-+ cq
-+ 所有参与使用的同学
+GUI / 安装器按 GPL-3.0-or-later 分发，见 `drcom4scut-rs/LICENSE`。保留上游原始 LICENSE；上游 Cargo 声明 GPL-3.0-or-later，而 LICENSE 文件为 LGPL-3.0，原始声明与文件均保留，当前组合发行按 GPL-3.0-or-later 处理。Lucide 图标使用 ISC；详见 `drcom4scut-rs/resources/licenses/NOTICE.txt`。
