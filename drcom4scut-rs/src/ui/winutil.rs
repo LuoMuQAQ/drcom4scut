@@ -229,8 +229,39 @@ pub fn screen_dpi() -> u32 {
     }
 }
 
+/// Query the actual monitor DPI of an existing per-monitor-aware window.
+pub fn window_dpi(hwnd: windows::Win32::Foundation::HWND) -> u32 {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetDpiForWindow(hwnd: windows::Win32::Foundation::HWND) -> u32;
+    }
+    let dpi = unsafe { GetDpiForWindow(hwnd) };
+    if dpi == 0 {
+        screen_dpi()
+    } else {
+        dpi
+    }
+}
+
 /// 指定窗口所在显示器的工作区（不含任务栏）。
 pub fn monitor_work_area(hwnd: windows::Win32::Foundation::HWND) -> RECT {
+    #[link(name = "user32")]
+    extern "system" {
+        fn MonitorFromWindow(hwnd: windows::Win32::Foundation::HWND, flags: u32) -> isize;
+    }
+    monitor_area(unsafe { MonitorFromWindow(hwnd, 2) })
+}
+
+/// WM_DPICHANGED's suggested rectangle may already be on a different monitor.
+pub fn rect_work_area(rect: RECT) -> RECT {
+    #[link(name = "user32")]
+    extern "system" {
+        fn MonitorFromRect(rect: *const RECT, flags: u32) -> isize;
+    }
+    monitor_area(unsafe { MonitorFromRect(&rect, 2) })
+}
+
+fn monitor_area(monitor: isize) -> RECT {
     #[repr(C)]
     struct MonitorInfo {
         cb_size: u32,
@@ -238,24 +269,21 @@ pub fn monitor_work_area(hwnd: windows::Win32::Foundation::HWND) -> RECT {
         rc_work: RECT,
         dw_flags: u32,
     }
-    unsafe {
-        #[link(name = "user32")]
-        extern "system" {
-            fn MonitorFromWindow(hwnd: windows::Win32::Foundation::HWND, flags: u32) -> isize;
-            fn GetMonitorInfoW(monitor: isize, mi: *mut MonitorInfo) -> i32;
-        }
-        let hmon = MonitorFromWindow(hwnd, 2); // MONITOR_DEFAULTTONEAREST
-        let mut mi = MonitorInfo {
-            cb_size: std::mem::size_of::<MonitorInfo>() as u32,
-            rc_monitor: RECT::default(),
-            rc_work: RECT::default(),
-            dw_flags: 0,
-        };
-        if GetMonitorInfoW(hmon, &mut mi) != 0 {
-            return mi.rc_work;
-        }
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetMonitorInfoW(monitor: isize, mi: *mut MonitorInfo) -> i32;
     }
-    work_area()
+    let mut mi = MonitorInfo {
+        cb_size: std::mem::size_of::<MonitorInfo>() as u32,
+        rc_monitor: RECT::default(),
+        rc_work: RECT::default(),
+        dw_flags: 0,
+    };
+    if unsafe { GetMonitorInfoW(monitor, &mut mi) } != 0 {
+        mi.rc_work
+    } else {
+        work_area()
+    }
 }
 
 /// 工作区（不含任务栏），用于窗口居中，避免整屏居中导致偏下。

@@ -28,7 +28,7 @@ https://npcap.com/#download
 多个便携副本可能共享此目录；删除它会清除保存的设置与日志。无需卸载共享 Npcap 驱动。
 
 版本与源码
-GUI / 安装版版本：@VERSION@。包含静默自启及开关、网卡菜单动画修复。
+GUI / 安装版版本：@VERSION@。包含静默自启、开关及网卡菜单动画修复，以及运行时分辨率/DPI 变化的布局修复。
 认证核心版本：patched 0.3.2，来源于 SeaLoong/drcom4scut 提交 ef20ae5c71744eb9e096f5e586713490ba01f4ee。
 对应源码：https://github.com/LuoMuQAQ/drcom4scut/tree/windows-v@VERSION@
 下载页面：https://github.com/LuoMuQAQ/drcom4scut/releases/tag/windows-v@VERSION@

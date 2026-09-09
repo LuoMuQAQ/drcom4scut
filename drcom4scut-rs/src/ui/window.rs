@@ -39,6 +39,8 @@ use super::layout;
 #[cfg(test)]
 #[path = "animation_render_tests.rs"]
 mod animation_render_tests;
+#[path = "display.rs"]
+mod display;
 use super::tray::{HIconOrFile, Tray};
 use super::winutil::{
     self, brush_as_gdi, create_font, delete_gdi, destroy_icon, font_as_gdi, solid_brush, wide,
@@ -73,7 +75,7 @@ const ID_EYE: isize = 1009;
 const EM_SETPASSWORDCHAR: u32 = 0x00CC;
 const HTCAPTION: usize = 2;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Hit {
     None,
     Drag,
@@ -138,28 +140,31 @@ struct App {
     eye_off: Option<winutil::SvgBmp>,
     hover: Hit,
     dpi: u32,
+    preview_dpi: Option<u32>,
+    layout_pending: bool,
+    layout_in_progress: bool,
 }
 
 impl App {
     fn s(&self, px: i32) -> i32 {
-        winutil::scale(px, self.dpi.max(96))
+        winutil::scale(px, self.dpi.max(1))
     }
 
     fn new() -> Self {
         let null = HWND(std::ptr::null_mut());
         let icon0 = windows::Win32::UI::WindowsAndMessaging::HICON(std::ptr::null_mut());
         let preview = std::env::args().any(|a| a == "--ui-preview");
-        let dpi = if preview {
+        let preview_dpi = if preview {
             std::env::args()
                 .find_map(|a| {
                     a.strip_prefix("--ui-dpi=")
                         .and_then(|d| d.parse::<u32>().ok())
                 })
                 .filter(|d| (96..=288).contains(d))
-                .unwrap_or_else(winutil::screen_dpi)
         } else {
-            winutil::screen_dpi()
+            None
         };
+        let dpi = preview_dpi.unwrap_or_else(winutil::screen_dpi);
         Self {
             preview,
             settings: Settings::default(),
@@ -210,6 +215,9 @@ impl App {
             eye_off: None,
             hover: Hit::None,
             dpi,
+            preview_dpi,
+            layout_pending: false,
+            layout_in_progress: false,
         }
     }
 }
@@ -289,6 +297,7 @@ pub fn create_main_window() -> Option<HWND> {
                 return None;
             }
         };
+        display::refresh(hwnd);
         initialize(hwnd);
         round_corners(hwnd);
         if !platform::is_autostart_launch() {
@@ -392,6 +401,28 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 drop(Box::from_raw(p));
             }
             PostQuitMessage(0);
+            LRESULT(0)
+        }
+        windows::Win32::UI::WindowsAndMessaging::WM_DPICHANGED => {
+            if lparam.0 != 0 {
+                display::change(hwnd, (wparam.0 & 0xffff) as u32, *(lparam.0 as *const RECT));
+            }
+            LRESULT(0)
+        }
+        windows::Win32::UI::WindowsAndMessaging::WM_DISPLAYCHANGE
+        | windows::Win32::UI::WindowsAndMessaging::WM_SETTINGCHANGE
+        | windows::Win32::UI::WindowsAndMessaging::WM_EXITSIZEMOVE => {
+            display::schedule(hwnd);
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        windows::Win32::UI::WindowsAndMessaging::WM_SIZE => {
+            if wparam.0 != windows::Win32::UI::WindowsAndMessaging::SIZE_MINIMIZED as usize {
+                display::schedule(hwnd);
+            }
+            LRESULT(0)
+        }
+        display::WM_APP_LAYOUT => {
+            display::refresh(hwnd);
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1),
@@ -1261,37 +1292,11 @@ unsafe fn create_controls(hwnd: HWND) {
         return;
     };
     let dpi = app.dpi;
-    let s = |v: i32| winutil::scale(v, dpi);
     let font = app.font;
-    let user_field = RECT {
-        left: s(layout::FIELD_LEFT),
-        top: s(layout::USER_TOP),
-        right: s(layout::FIELD_RIGHT),
-        bottom: s(layout::USER_TOP + layout::FIELD_HEIGHT),
-    };
-    let pass_field = RECT {
-        left: s(layout::FIELD_LEFT),
-        top: s(layout::PASS_TOP),
-        right: s(layout::FIELD_RIGHT),
-        bottom: s(layout::PASS_TOP + layout::FIELD_HEIGHT),
-    };
-    let user_rc = RECT {
-        left: user_field.left + s(10),
-        right: user_field.right - s(10),
-        ..user_field
-    };
-    let pass_rc = RECT {
-        left: pass_field.left + s(10),
-        right: pass_field.right - s(40),
-        ..pass_field
-    };
-    let icon = s(20);
-    app.eye_rect = RECT {
-        left: pass_field.right - s(10) - icon,
-        top: pass_field.top + (s(36) - icon) / 2,
-        right: pass_field.right - s(10),
-        bottom: pass_field.top + (s(36) - icon) / 2 + icon,
-    };
+    let controls = layout::controls(dpi);
+    let user_rc = controls.user;
+    let pass_rc = controls.pass;
+    app.eye_rect = controls.eye_hit;
     let user = create_child(
         hwnd,
         w!("EDIT"),
@@ -1299,9 +1304,9 @@ unsafe fn create_controls(hwnd: HWND) {
         child_style(ES_AUTOHSCROLL as u32),
         WINDOW_EX_STYLE(0),
         user_rc.left,
-        user_rc.top + 1,
+        user_rc.top,
         user_rc.right - user_rc.left,
-        user_rc.bottom - user_rc.top - 2,
+        user_rc.bottom - user_rc.top,
         ID_USER,
     );
     let pass = create_child(
@@ -1311,9 +1316,9 @@ unsafe fn create_controls(hwnd: HWND) {
         child_style((ES_AUTOHSCROLL | ES_PASSWORD) as u32),
         WINDOW_EX_STYLE(0),
         pass_rc.left,
-        pass_rc.top + 1,
+        pass_rc.top,
         pass_rc.right - pass_rc.left,
-        pass_rc.bottom - pass_rc.top - 2,
+        pass_rc.bottom - pass_rc.top,
         ID_PASS,
     );
     app.hwnd_user = user;
@@ -1331,12 +1336,13 @@ unsafe fn create_controls(hwnd: HWND) {
         w!("显示密码"),
         child_style(0xB),
         WINDOW_EX_STYLE(0),
-        s(348),
-        s(layout::PASS_TOP + 4),
-        s(30),
-        s(layout::FIELD_HEIGHT - 8),
+        controls.eye.left,
+        controls.eye.top,
+        controls.eye.right - controls.eye.left,
+        controls.eye.bottom - controls.eye.top,
         ID_EYE,
     );
+    set_font(app.hwnd_eye, font);
     use windows::Win32::UI::Controls::{
         TOOLTIPS_CLASSW, TTF_IDISHWND, TTF_SUBCLASS, TTM_ADDTOOLW, TTTOOLINFOW as TOOLINFOW,
     };
