@@ -54,6 +54,9 @@ pub fn wake_event_name(mutex_name: &str) -> String {
 /// 开机启动计划任务名（.NET `Services.cs:808` 的 TaskName）。
 pub const TASK_NAME: &str = "drcom4scutGUI";
 
+/// 登录自启参数：有此参数时不显示主窗口，只在托盘后台运行。
+pub const AUTOSTART_ARG: &str = "--autostart";
+
 /// 旧版自启动残留所在的 Run 键（.NET `Services.cs:806`）。
 pub const RUN_KEY_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 
@@ -288,23 +291,42 @@ impl Drop for Guard {
 // 开机启动（schtasks 计划任务）
 // ---------------------------------------------------------------------------
 
+/// 计划任务 `/TR` 命令：带引号的 exe 路径后加静默自启参数。
+pub fn build_task_run(exe_path: &str) -> String {
+    format!("\"{exe_path}\" {AUTOSTART_ARG}")
+}
+
 /// 构建 `schtasks /Create` 参数列表。纯函数，便于测试引号与路径空格处理。
 ///
-/// 与 .NET `CreateLogonTask`（`Services.cs:831-832`）的命令行一致：
-/// `/TR` 的值必须用内层引号包裹完整 exe 路径，否则含空格的路径会被截断。
+/// `/TR` 的 exe 路径必须用内层引号包裹，否则含空格的路径会被截断。
+/// 登录触发时带 `--autostart`，不弹出主窗口。
 pub fn build_create_command(exe_path: &str) -> Vec<String> {
     vec![
         "/Create".into(),
         "/TN".into(),
         TASK_NAME.into(),
         "/TR".into(),
-        format!("\"{exe_path}\""),
+        build_task_run(exe_path),
         "/SC".into(),
         "ONLOGON".into(),
         "/RL".into(),
         "HIGHEST".into(),
         "/F".into(),
     ]
+}
+
+/// 命令行是否包含登录自启参数。
+pub fn is_autostart_args<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    args.into_iter().any(|a| a.as_ref() == AUTOSTART_ARG)
+}
+
+/// 当前进程是否由登录自启计划任务拉起。
+pub fn is_autostart_launch() -> bool {
+    is_autostart_args(std::env::args())
 }
 
 /// schtasks 的一次运行结果。
@@ -565,19 +587,25 @@ mod tests {
         assert_eq!(cmd[1], "/TN");
         assert_eq!(cmd[2], "drcom4scutGUI");
         assert_eq!(cmd[3], "/TR");
-        // 内层引号必须包住含空格的完整路径。
+        // 内层引号必须包住含空格的完整路径，并附带静默自启参数。
         assert_eq!(
             cmd[4],
-            r#""C:\Program Files\drcom4scutGUI\drcom4scutGUI.exe""#
+            r#""C:\Program Files\drcom4scutGUI\drcom4scutGUI.exe" --autostart"#
         );
         assert_eq!(&cmd[5..], &["/SC", "ONLOGON", "/RL", "HIGHEST", "/F"]);
     }
 
     #[test]
     fn create_command_always_wraps_simple_path() {
-        // 与 .NET 版一致：无论是否含空格，/TR 值始终带内层引号。
         let cmd = build_create_command(r"C:\Apps\drcom4scutGUI.exe");
-        assert_eq!(cmd[4], r#""C:\Apps\drcom4scutGUI.exe""#);
+        assert_eq!(cmd[4], r#""C:\Apps\drcom4scutGUI.exe" --autostart"#);
+    }
+
+    #[test]
+    fn autostart_arg_detected_in_command_line() {
+        assert!(is_autostart_args(["drcom4scutGUI.exe", "--autostart"]));
+        assert!(!is_autostart_args(["drcom4scutGUI.exe"]));
+        assert!(!is_autostart_args(["drcom4scutGUI.exe", "--ui-preview"]));
     }
 
     #[test]

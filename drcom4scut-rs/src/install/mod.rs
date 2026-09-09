@@ -21,7 +21,7 @@ pub mod validate;
 
 pub const APP_DISPLAY_NAME: &str = "校园网认证客户端";
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const APP_VERSION_QUAD: &str = "0.3.1.0";
+pub const APP_VERSION_QUAD: &str = concat!(env!("CARGO_PKG_VERSION"), ".0");
 pub const GUI_EXE_NAME: &str = "drcom4scutGUI.exe";
 pub const UNINSTALL_EXE_NAME: &str = "uninstall.exe";
 pub const SETUP_MUTEX_NAME: &str = "Local\\drcom4scutGUI-Setup";

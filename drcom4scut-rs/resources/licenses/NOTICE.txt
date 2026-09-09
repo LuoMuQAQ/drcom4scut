@@ -1,4 +1,4 @@
-校园网认证客户端（drcom4scutGUI）0.3.1
+校园网认证客户端（drcom4scutGUI）0.3.2
 
 本安装包含：
 - drcom4scutGUI 及其原生安装器/卸载器（GPL-3.0-or-later）

@@ -144,7 +144,7 @@ unsafe extern "system" fn field_proc(
                         LPARAM(0),
                     );
                 } else if wp.0 == 27 {
-                    let _ = ShowWindow(parent, SW_HIDE);
+                    let _ = PostMessageW(Some(parent), WM_KEYDOWN, wp, lp);
                 } else {
                     let shift = windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState(16) < 0;
                     if let Ok(next) = GetNextDlgTabItem(parent, Some(hwnd), shift) {

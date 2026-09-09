@@ -14,16 +14,16 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, VK_ESCAPE};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetWindowLongPtrW,
-    GetWindowTextW, LoadCursorW, LoadImageW, MessageBoxW, PostQuitMessage, RegisterClassW,
-    SendMessageW, SetCursor, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos,
-    SetWindowTextW, ShowWindow, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HMENU, HWND_TOP, IDC_ARROW,
-    IDC_HAND, IDYES, IMAGE_ICON, LR_LOADFROMFILE, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK,
-    MB_YESNO, SWP_NOACTIVATE, SW_HIDE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNA,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT,
-    WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCLBUTTONDOWN, WM_PAINT, WM_SETFONT, WM_TIMER, WNDCLASSW,
-    WS_CHILD, WS_CLIPCHILDREN, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
-    WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    GetWindowTextW, KillTimer, LoadCursorW, LoadImageW, MessageBoxW, PostQuitMessage,
+    RegisterClassW, SendMessageW, SetCursor, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
+    SetWindowTextW, ShowWindow, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HMENU, IDC_ARROW, IDC_HAND,
+    IDYES, IMAGE_ICON, LR_LOADFROMFILE, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MB_YESNO,
+    SW_HIDE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNA, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_ACTIVATE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX,
+    WM_CTLCOLORSTATIC, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_NCLBUTTONDOWN, WM_PAINT, WM_SETFONT, WM_TIMER, WNDCLASSW, WS_CHILD,
+    WS_CLIPCHILDREN, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP, WS_SYSMENU,
+    WS_TABSTOP, WS_VISIBLE,
 };
 
 use crate::controller::ReconnectBackoff;
@@ -34,7 +34,11 @@ use crate::model::{Adapter, LinkState, Settings};
 use crate::platform::{self, NpcapStatus};
 use crate::{adapters, paths, settings};
 
+use super::anim::{bool01, lerp_color, Anim};
 use super::layout;
+#[cfg(test)]
+#[path = "animation_render_tests.rs"]
+mod animation_render_tests;
 use super::tray::{HIconOrFile, Tray};
 use super::winutil::{
     self, brush_as_gdi, create_font, delete_gdi, destroy_icon, font_as_gdi, solid_brush, wide,
@@ -49,6 +53,13 @@ pub const WM_APP_FIELD_CLICK: u32 = windows::Win32::UI::WindowsAndMessaging::WM_
 
 const TIMER_POLL: usize = 1;
 const TIMER_MS: u32 = 2000;
+const TIMER_ANIM: usize = 2;
+// WM_TIMER is quantized to the system clock. 16 ms can become two 15.6 ms
+// ticks; requesting its supported 10 ms minimum avoids an accidental 32 Hz cap.
+const ANIM_MS: u32 = 10;
+const TOGGLE_ANIM_MS: u32 = 200;
+const COMBO_OPEN_MS: u32 = 180;
+const COMBO_CLOSE_MS: u32 = 140;
 const CLIENT_W: i32 = layout::WIDTH;
 const CLIENT_H: i32 = layout::HEIGHT;
 const TITLE_H: i32 = layout::TITLE_HEIGHT;
@@ -93,6 +104,10 @@ struct App {
     combo_open: bool,
     combo_scroll: i32,
     combo_hot: i32,
+    combo_visual: Anim,
+    toggle_anim: [Anim; 4],
+    anim_timer_running: bool,
+    popup_surface: Option<PopupSurface>,
     hwnd_popup: HWND,
     core_path: Option<PathBuf>,
     core: Option<OwnedCore>,
@@ -161,6 +176,10 @@ impl App {
             combo_open: false,
             combo_scroll: 0,
             combo_hot: -1,
+            combo_visual: Anim::snap(0.0),
+            toggle_anim: [Anim::snap(0.0); 4],
+            anim_timer_running: false,
+            popup_surface: None,
             hwnd_popup: null,
             core_path: None,
             core: None,
@@ -272,7 +291,9 @@ pub fn create_main_window() -> Option<HWND> {
         };
         initialize(hwnd);
         round_corners(hwnd);
-        let _ = ShowWindow(hwnd, SW_SHOW);
+        if !platform::is_autostart_launch() {
+            let _ = ShowWindow(hwnd, SW_SHOW);
+        }
         Some(hwnd)
     }
 }
@@ -428,7 +449,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut ps);
-            paint(hwnd, hdc);
+            paint(hwnd, hdc, ps.rcPaint);
             let _ = EndPaint(hwnd, &ps);
             LRESULT(0)
         }
@@ -444,7 +465,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_ACTIVATE => {
             if (wparam.0 & 0xFFFF) == 0 {
-                close_combo(hwnd);
+                dismiss_combo(hwnd);
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
@@ -468,6 +489,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     );
                 }
                 Hit::Min => {
+                    dismiss_combo(hwnd);
                     let _ = ShowWindow(hwnd, SW_MINIMIZE);
                 }
                 Hit::Close => request_close(hwnd),
@@ -475,16 +497,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 Hit::Eye => toggle_password_reveal(hwnd),
                 Hit::Combo => toggle_combo(hwnd),
 
-                Hit::Auto => toggle_flag(hwnd, |s| {
+                Hit::Auto => toggle_flag(hwnd, 0, |s| {
                     s.auto_login = !s.auto_login;
                 }),
-                Hit::Remember => toggle_flag(hwnd, |s| {
+                Hit::Remember => toggle_flag(hwnd, 1, |s| {
                     s.remember_password = !s.remember_password;
                 }),
-                Hit::Startup => toggle_flag(hwnd, |s| {
+                Hit::Startup => toggle_flag(hwnd, 2, |s| {
                     s.start_with_windows = !s.start_with_windows;
                 }),
-                Hit::TrayKeep => toggle_flag(hwnd, |s| {
+                Hit::TrayKeep => toggle_flag(hwnd, 3, |s| {
                     s.minimize_to_tray = !s.minimize_to_tray;
                 }),
                 Hit::None => {}
@@ -497,8 +519,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             if let Some(app) = app_mut(hwnd) {
                 let h = hit_test(app, x, y);
                 if h != app.hover {
+                    let previous = app.hover;
                     app.hover = h;
-                    invalidate(hwnd);
+                    // Only caption/action buttons paint a hover state. Crossing
+                    // a toggle must not queue an expensive full-window redraw.
+                    invalidate_hover(hwnd, previous);
+                    invalidate_hover(hwnd, h);
                 }
                 let cursor = if matches!(
                     h,
@@ -524,6 +550,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_KEYDOWN => {
             if wparam.0 as u16 == VK_ESCAPE.0 {
+                if app_mut(hwnd).is_some_and(|app| app.combo_open) {
+                    close_combo(hwnd);
+                    return LRESULT(0);
+                }
+                dismiss_combo(hwnd);
                 let _ = ShowWindow(hwnd, SW_HIDE);
                 return LRESULT(0);
             }
@@ -536,6 +567,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_TIMER => {
             if wparam.0 == TIMER_POLL {
                 on_timer(hwnd);
+            } else if wparam.0 == TIMER_ANIM {
+                on_anim_timer(hwnd);
             }
             LRESULT(0)
         }
@@ -621,10 +654,21 @@ unsafe fn toggle_combo(hwnd: HWND) {
         close_combo(hwnd);
     } else {
         app.combo_open = true;
-        app.combo_scroll = 0;
-        app.combo_hot = app.combo_sel;
+        let from = app.combo_visual.value();
+        app.combo_visual = Anim::snap(from);
+        if from == 0.0 {
+            app.combo_scroll = 0;
+            app.combo_hot = app.combo_sel;
+        }
         show_combo_popup(hwnd);
-        invalidate(hwnd);
+        // First-time shadow rasterization must not consume the opening tween.
+        if let Some(app) = app_mut(hwnd) {
+            if app.combo_open {
+                app.combo_visual = Anim::go(from, 1.0, COMBO_OPEN_MS);
+            }
+        }
+        start_anim_timer(hwnd);
+        invalidate_combo(hwnd);
     }
 }
 
@@ -632,26 +676,44 @@ unsafe fn close_combo(hwnd: HWND) {
     let Some(app) = app_mut(hwnd) else {
         return;
     };
-    if !app.combo_open && (app.hwnd_popup.0.is_null() || !is_window_visible(app.hwnd_popup)) {
-        app.combo_open = false;
+    // Focus notifications can repeat while closing. Never restart the fade.
+    if !app.combo_open {
         return;
     }
     app.combo_open = false;
-    if !app.hwnd_popup.0.is_null() {
+    app.combo_visual = Anim::go(app.combo_visual.value(), 0.0, COMBO_CLOSE_MS);
+    if app.combo_visual.done() && !app.hwnd_popup.0.is_null() {
         let _ = ShowWindow(app.hwnd_popup, SW_HIDE);
     }
-    invalidate(hwnd);
+    start_anim_timer(hwnd);
+    invalidate_combo(hwnd);
 }
 
-fn is_window_visible(hwnd: HWND) -> bool {
-    unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(hwnd).as_bool() }
+/// Stop popup presentation before hiding/minimizing the owner. A queued frame
+/// must not show an owned popup again after its owner disappeared.
+unsafe fn dismiss_combo(hwnd: HWND) {
+    if let Some(app) = app_mut(hwnd) {
+        app.combo_open = false;
+        app.combo_visual = Anim::snap(0.0);
+        if !app.hwnd_popup.0.is_null() {
+            let _ = ShowWindow(app.hwnd_popup, SW_HIDE);
+        }
+    }
+    invalidate_combo(hwnd);
 }
 
 unsafe fn show_combo_popup(main: HWND) {
+    if !app_mut(main).is_some_and(|app| app.combo_open || !app.combo_visual.done()) {
+        return;
+    }
+    let popup = ensure_combo_popup(main);
+    if popup.0.is_null() {
+        dismiss_combo(main);
+        return;
+    }
     let Some(app) = app_mut(main) else {
         return;
     };
-    let popup = ensure_combo_popup(main);
     let s = |v: i32| app.s(v);
     let n = app.adapters.len() as i32 + 1;
     let item_h = s(40);
@@ -675,26 +737,33 @@ unsafe fn show_combo_popup(main: HWND) {
     let space_below = (wa.bottom - br.y - gap - shadow * 2).max(0);
     let space_above = (tl.y - wa.top - gap - shadow * 2).max(0);
     let min_h = item_h + pad * 2;
-    let (card_x, card_y, card_h) = if content_h <= space_below {
-        (tl.x, br.y + gap, content_h)
+    let (card_x, card_y, card_h, opens_down) = if content_h <= space_below {
+        (tl.x, br.y + gap, content_h, true)
     } else if content_h <= space_above {
-        (tl.x, tl.y - gap - content_h, content_h)
+        (tl.x, tl.y - gap - content_h, content_h, false)
     } else if space_below >= space_above {
-        (tl.x, br.y + gap, space_below.max(min_h))
+        (tl.x, br.y + gap, space_below.max(min_h), true)
     } else {
         let h = space_above.max(min_h);
-        (tl.x, tl.y - gap - h, h)
+        (tl.x, tl.y - gap - h, h, false)
+    };
+    let t = app.combo_visual.value();
+    let slide = ((1.0 - t) * s(8) as f32).round() as i32;
+    let card_y = if opens_down {
+        card_y - slide
+    } else {
+        card_y + slide
     };
     let pw = (card_w + shadow * 2).min(wa.right - wa.left);
     let ph = (card_h + shadow * 2).min(wa.bottom - wa.top);
     let px = (card_x - shadow).clamp(wa.left, wa.right - pw);
     let py = (card_y - shadow).clamp(wa.top, wa.bottom - ph);
-    let _ = SetWindowPos(popup, Some(HWND_TOP), px, py, pw, ph, SWP_NOACTIVATE);
-    let dc = windows::Win32::Graphics::Gdi::GetDC(None);
-    paint_combo_popup(popup, main, dc);
-    let _ = windows::Win32::Graphics::Gdi::ReleaseDC(None, dc);
-    let _ = ShowWindow(popup, SW_SHOWNA);
-    let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(popup), None, false);
+    // Update position, size and alpha in one compositor submission. Moving the
+    // HWND first exposes its old bitmap and causes a second paint per frame.
+    paint_combo_popup(popup, main, POINT { x: px, y: py }, pw, ph);
+    if !windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(popup).as_bool() {
+        let _ = ShowWindow(popup, SW_SHOWNA);
+    }
 }
 
 unsafe fn ensure_combo_popup(main: HWND) -> HWND {
@@ -756,9 +825,9 @@ unsafe extern "system" fn combo_popup_wndproc(
         WM_ERASEBKGND => LRESULT(1),
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
-            let hdc = BeginPaint(hwnd, &mut ps);
+            let _ = BeginPaint(hwnd, &mut ps);
             if !main.0.is_null() {
-                paint_combo_popup(hwnd, main, hdc);
+                show_combo_popup(main);
             }
             let _ = EndPaint(hwnd, &ps);
             LRESULT(0)
@@ -818,6 +887,9 @@ fn combo_max_scroll(app: &App, popup: HWND) -> i32 {
 
 fn popup_item_at(main: HWND, popup: HWND, x: i32, y: i32) -> Option<i32> {
     let app = unsafe { app_mut(main)? };
+    if !app.combo_open {
+        return None;
+    }
     let s = |v: i32| app.s(v);
     let shadow = s(10);
     let pad = s(8);
@@ -846,59 +918,99 @@ fn popup_item_at(main: HWND, popup: HWND, x: i32, y: i32) -> Option<i32> {
     }
 }
 
-unsafe fn paint_combo_popup(popup: HWND, main: HWND, hdc: HDC) {
+/// Cached premultiplied menu surface. Shadow rasterization is independent of
+/// animation; text/highlights are repainted only when their content changes.
+struct PopupSurface {
+    bmp: winutil::SvgBmp,
+    background: Vec<u8>,
+    content: Option<(i32, i32, i32)>,
+}
+
+impl PopupSurface {
+    fn new(app: &App, w: i32, h: i32) -> Option<Self> {
+        let edge = app.s(10);
+        let blur = app.s(3);
+        let cw = w - edge * 2;
+        let ch = h - edge * 2;
+        let radius = winutil::component_radius(ch, app.dpi);
+        let svg = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">
+          <defs><filter id="shadow" x="-50%" y="-50%" width="200%" height="200%" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="{blur}"/></filter></defs>
+          <rect x="{edge}" y="{}" width="{cw}" height="{ch}" rx="{radius}" fill="#000" opacity=".12" filter="url(#shadow)"/>
+          <rect x="{}" y="{}" width="{}" height="{}" rx="{radius}" fill="#fff" stroke="#dedede" stroke-width="1"/>
+          </svg>"##,
+            edge + app.s(2),
+            edge as f32 + 0.5,
+            edge as f32 + 0.5,
+            cw - 1,
+            ch - 1
+        );
+        let bmp = winutil::rasterize_svg(svg.as_bytes(), w.max(h) as u32)?;
+        let background =
+            unsafe { std::slice::from_raw_parts(bmp.bits, (w * h * 4) as usize).to_vec() };
+        Some(Self {
+            bmp,
+            background,
+            content: None,
+        })
+    }
+
+    unsafe fn update(&mut self, app: &App, hdc: HDC) {
+        use windows::Win32::Graphics::Gdi::HGDIOBJ;
+        let key = (app.combo_sel, app.combo_hot, app.combo_scroll);
+        if self.content == Some(key) {
+            return;
+        }
+        let pixels = std::slice::from_raw_parts_mut(self.bmp.bits, self.background.len());
+        pixels.copy_from_slice(&self.background);
+        let mem = CreateCompatibleDC(Some(hdc));
+        let old = SelectObject(mem, HGDIOBJ(self.bmp.hbmp.0));
+        paint_combo_popup_ui(app, mem, self.bmp.w, self.bmp.h);
+        let _ = windows::Win32::Graphics::Gdi::GdiFlush();
+        // GDI clears alpha when drawing text. The content clip lies entirely
+        // inside the opaque card, so restoring its original alpha is sufficient.
+        for (p, bg) in pixels
+            .chunks_exact_mut(4)
+            .zip(self.background.chunks_exact(4))
+        {
+            p[3] = bg[3];
+        }
+        let _ = SelectObject(mem, old);
+        let _ = DeleteDC(mem);
+        self.content = Some(key);
+    }
+}
+
+unsafe fn paint_combo_popup(popup: HWND, main: HWND, position: POINT, w: i32, h: i32) {
     use windows::Win32::Graphics::Gdi::{AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION, HGDIOBJ};
     use windows::Win32::UI::WindowsAndMessaging::{UpdateLayeredWindow, ULW_ALPHA};
-    let mut rc = RECT::default();
-    let _ = GetClientRect(popup, &mut rc);
-    let w = rc.right;
-    let h = rc.bottom;
-    if w <= 0 || h <= 0 {
-        return;
-    }
     let Some(app) = app_mut(main) else {
         return;
     };
-    let edge = app.s(10);
-    let blur = app.s(3);
-    let cw = w - edge * 2;
-    let ch = h - edge * 2;
-    let radius = winutil::component_radius(ch, app.dpi);
-    let svg = format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">
-      <defs><filter id="shadow" x="-50%" y="-50%" width="200%" height="200%" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="{blur}"/></filter></defs>
-      <rect x="{edge}" y="{}" width="{cw}" height="{ch}" rx="{radius}" fill="#000" opacity=".12" filter="url(#shadow)"/>
-      <rect x="{}" y="{}" width="{}" height="{}" rx="{radius}" fill="#fff" stroke="#dedede" stroke-width="1"/>
-      </svg>"##,
-        edge + app.s(2),
-        edge as f32 + 0.5,
-        edge as f32 + 0.5,
-        cw - 1,
-        ch - 1
-    );
-    let Some(bmp) = winutil::rasterize_svg(svg.as_bytes(), w.max(h) as u32) else {
+    if w <= 0 || h <= 0 {
         return;
-    };
-    let pixels = std::slice::from_raw_parts_mut(bmp.bits, (w * h * 4) as usize);
-    let alpha: Vec<u8> = pixels.chunks_exact(4).map(|p| p[3]).collect();
-    let mem = CreateCompatibleDC(Some(hdc));
-    let old = SelectObject(mem, HGDIOBJ(bmp.hbmp.0));
-    paint_combo_popup_ui(popup, main, mem);
-    let _ = windows::Win32::Graphics::Gdi::GdiFlush();
-    // GDI text writes RGB but clears alpha. Restore the SVG surface's alpha.
-    for (p, a) in pixels.chunks_exact_mut(4).zip(alpha) {
-        p[3] = a;
     }
+    let mut surface = match app.popup_surface.take() {
+        Some(surface) if surface.bmp.w == w && surface.bmp.h == h => surface,
+        _ => match PopupSurface::new(app, w, h) {
+            Some(surface) => surface,
+            None => return,
+        },
+    };
+    let dc = windows::Win32::Graphics::Gdi::GetDC(None);
+    surface.update(app, dc);
+    let mem = CreateCompatibleDC(Some(dc));
+    let old = SelectObject(mem, HGDIOBJ(surface.bmp.hbmp.0));
     let blend = BLENDFUNCTION {
         BlendOp: AC_SRC_OVER as u8,
         BlendFlags: 0,
-        SourceConstantAlpha: 255,
+        SourceConstantAlpha: (app.combo_visual.value() * 255.0).round().clamp(0.0, 255.0) as u8,
         AlphaFormat: AC_SRC_ALPHA as u8,
     };
     let _ = UpdateLayeredWindow(
         popup,
-        Some(hdc),
-        None,
+        Some(dc),
+        Some(&position),
         Some(&windows::Win32::Foundation::SIZE { cx: w, cy: h }),
         Some(mem),
         Some(&POINT::default()),
@@ -908,14 +1020,17 @@ unsafe fn paint_combo_popup(popup: HWND, main: HWND, hdc: HDC) {
     );
     let _ = SelectObject(mem, old);
     let _ = DeleteDC(mem);
+    let _ = windows::Win32::Graphics::Gdi::ReleaseDC(None, dc);
+    app.popup_surface = Some(surface);
 }
 
-unsafe fn paint_combo_popup_ui(popup: HWND, main: HWND, hdc: HDC) {
-    let Some(app) = app_mut(main) else {
-        return;
+unsafe fn paint_combo_popup_ui(app: &App, hdc: HDC, w: i32, h: i32) {
+    let rc = RECT {
+        left: 0,
+        top: 0,
+        right: w,
+        bottom: h,
     };
-    let mut rc = RECT::default();
-    let _ = GetClientRect(popup, &mut rc);
     let s = |v: i32| app.s(v);
     let shadow = s(10);
     let _ = SetBkMode(hdc, TRANSPARENT);
@@ -1009,10 +1124,135 @@ unsafe fn paint_combo_popup_ui(popup: HWND, main: HWND, hdc: HDC) {
     let _ = windows::Win32::Graphics::Gdi::RestoreDC(hdc, saved);
 }
 
-unsafe fn toggle_flag(hwnd: HWND, f: impl FnOnce(&mut Settings)) {
+unsafe fn toggle_flag(hwnd: HWND, which: usize, f: impl FnOnce(&mut Settings)) {
     if let Some(app) = app_mut(hwnd) {
         f(&mut app.settings);
+        let on = match which {
+            0 => app.settings.auto_login,
+            1 => app.settings.remember_password,
+            2 => app.settings.start_with_windows,
+            _ => app.settings.minimize_to_tray,
+        };
+        let from = app.toggle_anim[which].value();
+        app.toggle_anim[which] = Anim::go(from, bool01(on), TOGGLE_ANIM_MS);
+        let rc = toggle_rect(app, which);
+        start_anim_timer(hwnd);
+        let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), Some(&rc), false);
+    }
+}
+
+fn snap_toggle_anims(app: &mut App) {
+    app.toggle_anim[0] = Anim::snap(bool01(app.settings.auto_login));
+    app.toggle_anim[1] = Anim::snap(bool01(app.settings.remember_password));
+    app.toggle_anim[2] = Anim::snap(bool01(app.settings.start_with_windows));
+    app.toggle_anim[3] = Anim::snap(bool01(app.settings.minimize_to_tray));
+}
+
+unsafe fn start_anim_timer(hwnd: HWND) {
+    let Some(app) = app_mut(hwnd) else {
+        return;
+    };
+    if app.anim_timer_running {
+        return;
+    }
+    app.anim_timer_running = SetTimer(Some(hwnd), TIMER_ANIM, ANIM_MS, None) != 0;
+    if !app.anim_timer_running {
+        snap_toggle_anims(app);
+        app.combo_visual = Anim::snap(bool01(app.combo_open));
+        if app.combo_open {
+            show_combo_popup(hwnd);
+        } else {
+            dismiss_combo(hwnd);
+        }
         invalidate(hwnd);
+    }
+}
+
+unsafe fn invalidate_combo(hwnd: HWND) {
+    if let Some(app) = app_mut(hwnd) {
+        let rc = RECT {
+            left: app.s(36) - 2,
+            top: app.s(layout::COMBO_TOP) - 2,
+            right: app.s(384) + 2,
+            bottom: app.s(layout::COMBO_TOP + layout::FIELD_HEIGHT) + 2,
+        };
+        let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), Some(&rc), false);
+    }
+}
+
+unsafe fn invalidate_hover(hwnd: HWND, hit: Hit) {
+    let Some(app) = app_mut(hwnd) else {
+        return;
+    };
+    let rect = match hit {
+        Hit::Min => RECT {
+            left: CLIENT_W - 92,
+            top: 0,
+            right: CLIENT_W - 46,
+            bottom: TITLE_H,
+        },
+        Hit::Close => RECT {
+            left: CLIENT_W - 46,
+            top: 0,
+            right: CLIENT_W,
+            bottom: TITLE_H,
+        },
+        Hit::Connect => RECT {
+            left: layout::CARD_LEFT,
+            top: layout::ACTION_TOP,
+            right: layout::CARD_RIGHT,
+            bottom: layout::ACTION_BOTTOM,
+        },
+        _ => return,
+    };
+    let rect = RECT {
+        left: app.s(rect.left) - 2,
+        top: app.s(rect.top) - 2,
+        right: app.s(rect.right) + 2,
+        bottom: app.s(rect.bottom) + 2,
+    };
+    let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), Some(&rect), false);
+}
+
+fn toggle_rect(app: &App, which: usize) -> RECT {
+    let x = if which % 2 == 0 { 154 } else { 344 };
+    let y = if which < 2 {
+        layout::TOGGLE_TOP
+    } else {
+        layout::TOGGLE_SECOND_TOP
+    };
+    RECT {
+        left: app.s(x - 1),
+        top: app.s(y - 1),
+        right: app.s(x + 41),
+        bottom: app.s(y + 21),
+    }
+}
+
+unsafe fn on_anim_timer(hwnd: HWND) {
+    let Some(app) = app_mut(hwnd) else {
+        return;
+    };
+    let now = Instant::now();
+    for i in 0..4 {
+        if app.toggle_anim[i].advance(now) {
+            let rc = toggle_rect(app, i);
+            let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), Some(&rc), false);
+        }
+    }
+    let combo_changed = app.combo_visual.advance(now);
+    let combo_visible = app.combo_open || !app.combo_visual.done();
+    if app.toggle_anim.iter().all(Anim::done) && app.combo_visual.done() {
+        let _ = KillTimer(Some(hwnd), TIMER_ANIM);
+        app.anim_timer_running = false;
+    }
+    if combo_changed {
+        invalidate_combo(hwnd);
+        if combo_visible {
+            show_combo_popup(hwnd);
+        } else if let Some(app) = app_mut(hwnd) {
+            let _ = ShowWindow(app.hwnd_popup, SW_HIDE);
+        }
     }
 }
 
@@ -1139,6 +1379,7 @@ unsafe fn initialize(hwnd: HWND) {
         app.settings.username = "202612345678".into();
         app.settings.password = "Ag09Test!".into();
         fill_controls(app);
+        snap_toggle_anims(app);
         app.logo_title = winutil::rasterize_app_svg(app.s(52) as u32);
         app.logo_status = winutil::rasterize_app_svg(app.s(152) as u32);
         app.eye_on = winutil::rasterize_eye_on(app.s(40) as u32);
@@ -1226,6 +1467,7 @@ unsafe fn initialize(hwnd: HWND) {
     }
 
     fill_controls(app);
+    snap_toggle_anims(app);
     let _ = paths::ensure_default_config();
 
     match platform::npcap_status() {
@@ -1284,6 +1526,11 @@ unsafe fn initialize(hwnd: HWND) {
     }
 
     platform::remove_legacy_run_value();
+    if app.settings.start_with_windows {
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = apply_startup(true, &exe);
+        }
+    }
 
     let complete = credentials_complete(app);
     app.desired_running = app.settings.auto_login && complete;
@@ -1304,6 +1551,7 @@ unsafe fn fill_controls(app: &mut App) {
         let _ = SetWindowTextW(app.hwnd_pass, PCWSTR(pass.as_ptr()));
     }
 
+    app.popup_surface = None;
     app.adapters = adapters::enumerate();
     app.combo_sel = adapters::select(&app.settings.adapter_id, &app.settings.mac, &app.adapters)
         .map(|i| i as i32 + 1)
@@ -1420,11 +1668,8 @@ unsafe fn start_connect(hwnd: HWND) {
 
 unsafe fn apply_startup(enable: bool, exe: &std::path::Path) -> Result<(), String> {
     platform::remove_legacy_run_value();
-    let installed = platform::is_installed();
-    if enable == installed {
-        return Ok(());
-    }
     if enable {
+        // 始终 /F 覆盖，升级后把旧任务改成带 --autostart 的命令行。
         platform::install(&exe.to_string_lossy())
     } else {
         platform::remove()
@@ -1662,6 +1907,7 @@ unsafe fn invalidate(hwnd: HWND) {
 }
 
 unsafe fn request_close(hwnd: HWND) {
+    dismiss_combo(hwnd);
     let Some(app) = app_mut(hwnd) else {
         return;
     };
@@ -1753,16 +1999,35 @@ unsafe fn set_password_reveal(hwnd: HWND, on: bool) {
     invalidate(hwnd);
 }
 
-unsafe fn paint(hwnd: HWND, hdc: HDC) {
+unsafe fn paint(hwnd: HWND, hdc: HDC, damage: RECT) {
     use windows::Win32::Graphics::Gdi::{
         SetBrushOrgEx, SetGraphicsMode, SetStretchBltMode, SetWorldTransform, StretchBlt,
         GM_ADVANCED, HALFTONE, XFORM,
     };
-    let mut rc = RECT::default();
-    let _ = GetClientRect(hwnd, &mut rc);
-    let w = rc.right;
-    let h = rc.bottom;
+    // HALFTONE samples neighboring pixels. Render a guard band so partial
+    // updates have identical antialiasing to a full-window paint.
+    let saved = windows::Win32::Graphics::Gdi::SaveDC(hdc);
+    let _ = windows::Win32::Graphics::Gdi::IntersectClipRect(
+        hdc,
+        damage.left,
+        damage.top,
+        damage.right,
+        damage.bottom,
+    );
+    let mut client = RECT::default();
+    let _ = GetClientRect(hwnd, &mut client);
+    let damage = RECT {
+        left: (damage.left - 4).max(0),
+        top: (damage.top - 4).max(0),
+        right: (damage.right + 4).min(client.right),
+        bottom: (damage.bottom + 4).min(client.bottom),
+    };
+    // Keep supersampling, but allocate and downsample only the damaged area.
+    // A 40x20 toggle must not rebuild a 1680x2096 full-window bitmap each tick.
+    let w = damage.right - damage.left;
+    let h = damage.bottom - damage.top;
     if w <= 0 || h <= 0 {
+        let _ = windows::Win32::Graphics::Gdi::RestoreDC(hdc, saved);
         return;
     }
     let sw = w * 4;
@@ -1776,8 +2041,8 @@ unsafe fn paint(hwnd: HWND, hdc: HDC) {
         eM12: 0.0,
         eM21: 0.0,
         eM22: 4.0,
-        eDx: 0.0,
-        eDy: 0.0,
+        eDx: -(damage.left * 4) as f32,
+        eDy: -(damage.top * 4) as f32,
     };
     let _ = SetWorldTransform(mem, &xf);
     paint_ui(hwnd, mem);
@@ -1792,11 +2057,24 @@ unsafe fn paint(hwnd: HWND, hdc: HDC) {
     let _ = SetWorldTransform(mem, &identity);
     let _ = SetStretchBltMode(hdc, HALFTONE);
     let _ = SetBrushOrgEx(hdc, 0, 0, None);
-    let _ = StretchBlt(hdc, 0, 0, w, h, Some(mem), 0, 0, sw, sh, SRCCOPY);
+    let _ = StretchBlt(
+        hdc,
+        damage.left,
+        damage.top,
+        w,
+        h,
+        Some(mem),
+        0,
+        0,
+        sw,
+        sh,
+        SRCCOPY,
+    );
     let _ = SelectObject(mem, old);
     let _ =
         windows::Win32::Graphics::Gdi::DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(bmp.0));
     let _ = DeleteDC(mem);
+    let _ = windows::Win32::Graphics::Gdi::RestoreDC(hdc, saved);
 }
 
 unsafe fn paint_ui(hwnd: HWND, hdc: HDC) {
@@ -1967,7 +2245,7 @@ unsafe fn paint_ui(hwnd: HWND, hdc: HDC) {
         s(layout::COMBO_TOP),
         s(348),
         s(36),
-        app.combo_open,
+        app.combo_open || app.combo_visual.value() > 0.08,
     );
     let combo_txt = combo_label(app);
     paint_text_centered(
@@ -1985,7 +2263,7 @@ unsafe fn paint_ui(hwnd: HWND, hdc: HDC) {
         s(368),
         s(layout::COMBO_TOP) + s(18),
         s(8),
-        app.combo_open,
+        app.combo_visual.value(),
     );
 
     paint_toggle_row(
@@ -1994,9 +2272,9 @@ unsafe fn paint_ui(hwnd: HWND, hdc: HDC) {
         s(36),
         s(layout::TOGGLE_TOP),
         "启动后自动连接",
-        app.settings.auto_login,
+        app.toggle_anim[0].value(),
         "保留密码",
-        app.settings.remember_password,
+        app.toggle_anim[1].value(),
         s(220),
         s(344),
     );
@@ -2006,9 +2284,9 @@ unsafe fn paint_ui(hwnd: HWND, hdc: HDC) {
         s(36),
         s(layout::TOGGLE_SECOND_TOP),
         "开机启动",
-        app.settings.start_with_windows,
+        app.toggle_anim[2].value(),
         "保留系统托盘",
-        app.settings.minimize_to_tray,
+        app.toggle_anim[3].value(),
         s(220),
         s(344),
     );
@@ -2074,23 +2352,33 @@ fn combo_label(app: &App) -> String {
     }
 }
 
-unsafe fn paint_chevron(hdc: HDC, cx: i32, cy: i32, arm: i32, up: bool) {
-    let color = COLOR_TEXT_SECONDARY;
-    let pen =
-        windows::Win32::Graphics::Gdi::CreatePen(windows::Win32::Graphics::Gdi::PS_SOLID, 2, color);
+unsafe fn paint_chevron(hdc: HDC, cx: i32, cy: i32, arm: i32, t: f32) {
+    use windows::Win32::Graphics::Gdi::{GetWorldTransform, SetWorldTransform, XFORM};
+    let mut original = XFORM::default();
+    let _ = GetWorldTransform(hdc, &mut original);
+    let (sin, cos) = (std::f32::consts::PI * t).sin_cos();
+    let rotated = XFORM {
+        eM11: cos * original.eM11,
+        eM12: sin * original.eM22,
+        eM21: -sin * original.eM11,
+        eM22: cos * original.eM22,
+        eDx: original.eDx + cx as f32 * original.eM11,
+        eDy: original.eDy + cy as f32 * original.eM22,
+    };
+    let _ = SetWorldTransform(hdc, &rotated);
+    let pen = windows::Win32::Graphics::Gdi::CreatePen(
+        windows::Win32::Graphics::Gdi::PS_SOLID,
+        (arm / 4).max(1),
+        COLOR_TEXT_SECONDARY,
+    );
     let old = SelectObject(hdc, windows::Win32::Graphics::Gdi::HGDIOBJ(pen.0));
-    if up {
-        let _ = MoveToEx(hdc, cx - arm, cy + arm / 2, None);
-        let _ = LineTo(hdc, cx, cy - arm / 2);
-        let _ = LineTo(hdc, cx + arm, cy + arm / 2);
-    } else {
-        let _ = MoveToEx(hdc, cx - arm, cy - arm / 2, None);
-        let _ = LineTo(hdc, cx, cy + arm / 2);
-        let _ = LineTo(hdc, cx + arm, cy - arm / 2);
-    }
+    let _ = MoveToEx(hdc, -arm, -arm / 2, None);
+    let _ = LineTo(hdc, 0, arm / 2);
+    let _ = LineTo(hdc, arm, -arm / 2);
     let _ = SelectObject(hdc, old);
     let _ =
         windows::Win32::Graphics::Gdi::DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(pen.0));
+    let _ = SetWorldTransform(hdc, &original);
 }
 
 unsafe fn paint_text(
@@ -2159,9 +2447,9 @@ unsafe fn paint_toggle_row(
     x: i32,
     y: i32,
     left: &str,
-    left_on: bool,
+    left_t: f32,
     right: &str,
-    right_on: bool,
+    right_t: f32,
     right_x: i32,
     toggle2_x: i32,
 ) {
@@ -2173,7 +2461,7 @@ unsafe fn paint_toggle_row(
         y + app.s(2),
         left,
     );
-    paint_toggle(hdc, app, x + app.s(118), y, left_on);
+    paint_toggle(hdc, app, x + app.s(118), y, left_t);
     paint_text(
         hdc,
         app.font_label,
@@ -2182,18 +2470,15 @@ unsafe fn paint_toggle_row(
         y + app.s(2),
         right,
     );
-    paint_toggle(hdc, app, toggle2_x, y, right_on);
+    paint_toggle(hdc, app, toggle2_x, y, right_t);
 }
 
-unsafe fn paint_toggle(hdc: HDC, app: &App, x: i32, y: i32, on: bool) {
+unsafe fn paint_toggle(hdc: HDC, app: &App, x: i32, y: i32, t: f32) {
+    use windows::Win32::Graphics::Gdi::{GetWorldTransform, SetWorldTransform, XFORM};
     let w = app.s(40);
     let h = app.s(20);
-    let fill = if on {
-        COLOR_ACCENT
-    } else {
-        winutil::COLOR_TOGGLE_OFF
-    };
-    winutil::fill_component(
+    let fill = lerp_color(winutil::COLOR_TOGGLE_OFF, COLOR_ACCENT, t);
+    winutil::fill_round(
         hdc,
         RECT {
             left: x,
@@ -2201,25 +2486,34 @@ unsafe fn paint_toggle(hdc: HDC, app: &App, x: i32, y: i32, on: bool) {
             right: x + w,
             bottom: y + h,
         },
-        app.dpi,
+        h / 2,
         fill,
         None,
     );
     let thumb = app.s(16);
-    let inset = (h - thumb) / 2;
-    let tx = if on { x + w - thumb - inset } else { x + inset };
-    winutil::fill_component(
+    let inset = (h - thumb) as f32 / 2.0;
+    let travel = (w - thumb) as f32 - inset * 2.0;
+    let tx = x as f32 + inset + travel * t.clamp(0.0, 1.0);
+    let ty = y as f32 + inset;
+    let mut original = XFORM::default();
+    let _ = GetWorldTransform(hdc, &mut original);
+    let mut shifted = original;
+    shifted.eDx += tx.fract() * original.eM11;
+    shifted.eDy += ty.fract() * original.eM22;
+    let _ = SetWorldTransform(hdc, &shifted);
+    winutil::fill_round(
         hdc,
         RECT {
-            left: tx,
-            top: y + inset,
-            right: tx + thumb,
-            bottom: y + inset + thumb,
+            left: tx as i32,
+            top: ty as i32,
+            right: tx as i32 + thumb,
+            bottom: ty as i32 + thumb,
         },
-        app.dpi,
+        thumb / 2,
         COLOR_CARD,
         None,
     );
+    let _ = SetWorldTransform(hdc, &original);
 }
 
 unsafe fn paint_caption_btn(
