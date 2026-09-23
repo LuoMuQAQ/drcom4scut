@@ -34,7 +34,7 @@ use windows::Win32::System::Threading::{
 use crate::paths;
 
 /// 嵌入核心的 SHA-256（十六进制小写）。
-pub const CORE_SHA256: &str = "1838ad6c20c99d84d8a6d2ee603dda133a2314209b65ed9cdd31d0247c8f1052";
+pub const CORE_SHA256: &str = "f7188e74a46587f6e44974fa8cbe3b07380be3b85e9f6a451074d46a95ca10a4";
 
 /// 嵌入的核心可执行文件字节（编译期校验哈希，见 `ensure_core_extracted_to`）。
 pub const CORE_BYTES: &[u8] = include_bytes!("../resources/drcom4scut.exe");

@@ -321,7 +321,7 @@ impl<'a> Process<'a> {
                             Ok(x) => match x.state {
                                 State::Success => {
                                     info!("Receive SUCCESS from EAP.");
-                                    match data.try_write_for(Duration::from_millis(100)) {
+                                    match data.try_write() {
                                         Ok(mut r) => {
                                             r.cks_md5 = x.data;
                                             info!("cks_md5(md5): {}", hex::encode(&r.cks_md5));
@@ -405,7 +405,7 @@ impl<'a> Process<'a> {
                 HeaderType::MiscResponseAlive => {
                     self.cancel_resend();
                     info!("Receive MiscResponseAlive.");
-                    if let Ok(mut r) = self.data.try_write_for(Duration::from_millis(100)) {
+                    if let Ok(mut r) = self.data.try_write() {
                         r.flux = Vec::from(&raw[8..12]);
                     } else {
                         error!("Failed to acquire write lock for flux data");
@@ -425,7 +425,7 @@ impl<'a> Process<'a> {
                     match HeartbeatType::from_vec(&raw[..]).0 {
                         2 => {
                             info!("Receive MiscHeartbeat2.");
-                            if let Ok(mut r) = self.data.try_write_for(Duration::from_millis(100)) {
+                            if let Ok(mut r) = self.data.try_write() {
                                 r.flux = Vec::from(&raw[16..20]);
                             } else {
                                 error!("Failed to acquire write lock for heartbeat2 flux");
@@ -476,7 +476,7 @@ impl<'a> Process<'a> {
     fn on_response_info(&mut self, raw: Vec<u8>) {
         let mut v = raw[16..32].to_vec();
         decrypt_info(&mut v);
-        if let Ok(mut r) = self.data.try_write_for(Duration::from_millis(100)) {
+        if let Ok(mut r) = self.data.try_write() {
             r.decrypted_from_misc_response_info = v;
         } else {
             error!("Failed to acquire write lock for response info");
@@ -529,7 +529,7 @@ impl<'a> Process<'a> {
         let data = &mut BytesMut::with_capacity(244);
         let settings = &self.settings;
         let fixed = &settings.data.misc_info;
-        match self.data.try_write_for(Duration::from_millis(100)) {
+        match self.data.try_write() {
             Ok(mut dt) => {
                 let cks = (MiscInfo {
                     mac: self.mac,
@@ -565,7 +565,7 @@ impl<'a> Process<'a> {
     fn send_misc_heartbeat_1(&mut self) {
         info!("Send MiscHeartbeat1.");
         let data = &mut BytesMut::with_capacity(40);
-        match self.data.try_write_for(Duration::from_millis(100)) {
+        match self.data.try_write() {
             Ok(mut dt) => {
                 dt.counter += 1;
                 dt.rnd = random_vec(2);
@@ -587,7 +587,7 @@ impl<'a> Process<'a> {
     fn send_misc_heartbeat_3(&mut self) {
         info!("Send MiscHeartbeat3.");
         let data = &mut BytesMut::with_capacity(40);
-        match self.data.try_write_for(Duration::from_millis(100)) {
+        match self.data.try_write() {
             Ok(mut dt) => {
                 dt.counter += 1;
                 MiscHeartbeat3 {
@@ -609,7 +609,7 @@ impl<'a> Process<'a> {
     fn send_alive(&mut self) {
         info!("Send Alive.");
         let data = &mut BytesMut::with_capacity(40);
-        match self.data.try_read_for(Duration::from_millis(100)) {
+        match self.data.try_read() {
             Ok(dt) => {
                 Alive {
                     cks_md5: dt.cks_md5.clone(),
