@@ -1,4 +1,4 @@
-//! Allow internal retries, but bound prolonged failure without healthy evidence.
+//! Allow internal retries, but bound prolonged failure without UDP heartbeat evidence.
 //! Timers use monotonic time; sleeping and unreadable logs grant a fresh grace.
 use crate::{
     logparse::{classify, Signal},
@@ -17,6 +17,7 @@ pub struct HealthMonitor {
     healthy_since: Option<Instant>,
     last_poll: Instant,
     observed_activity: bool,
+    eap_authenticated: bool,
     scheduled_wait: bool,
     state: LinkState,
 }
@@ -35,6 +36,7 @@ impl HealthMonitor {
             healthy_since: None,
             last_poll: now,
             observed_activity: false,
+            eap_authenticated: false,
             scheduled_wait: false,
             state: LinkState::Connecting,
         }
@@ -56,12 +58,17 @@ impl HealthMonitor {
                 self.last_activity = now;
                 self.observed_activity = true;
                 match classify(line) {
-                    Signal::Healthy => {
+                    Signal::Healthy if line.contains("Heartbeat done") => {
+                        self.eap_authenticated = true;
                         self.last_health = Some(now);
                         self.recovery_since = now;
                         self.healthy_since.get_or_insert(now);
                         self.scheduled_wait = false;
                         self.state = LinkState::Online;
+                    }
+                    Signal::Healthy => {
+                        // EAP success/Identity heartbeats do not prove the UDP session is alive.
+                        self.eap_authenticated = true;
                     }
                     Signal::Error => {
                         self.healthy_since = None;
@@ -106,6 +113,7 @@ impl HealthMonitor {
             restart_stalled: lines.is_some()
                 && !self.scheduled_wait
                 && ((self.observed_activity && now.duration_since(self.last_activity) > STALE)
+                    || (self.eap_authenticated && now.duration_since(self.recovery_since) > STALE)
                     || now.duration_since(self.recovery_since) > UNHEALTHY_LIMIT),
             monitoring_unavailable: lines.is_none(),
             stable: fresh_health
@@ -184,7 +192,7 @@ mod tests {
         }
     }
     #[test]
-    fn core_retries_are_not_interrupted_and_ignored_timeouts_keep_online() {
+    fn core_retries_are_not_interrupted_while_udp_heartbeats_continue() {
         let t = Instant::now();
         let mut m = HealthMonitor::new(t);
         observe(&mut m, t, "Heartbeat done");
@@ -201,7 +209,9 @@ mod tests {
             let d = observe(
                 &mut m,
                 t + Duration::from_secs(s),
-                if s % 10 == 0 {
+                if s % 12 == 0 {
+                    "Heartbeat done"
+                } else if s % 10 == 0 {
                     "Fatal error at UDP Process thread! Will try restart in 15 second(s)."
                 } else {
                     ""
@@ -212,6 +222,63 @@ mod tests {
         let d = observe(&mut m, t + Duration::from_secs(600), "Heartbeat done");
         assert_eq!(d.state, LinkState::Online);
         assert!(!d.stable);
+    }
+    #[test]
+    fn eap_heartbeats_cannot_hide_udp_waiting_for_a_success_that_never_arrives() {
+        let t = Instant::now();
+        let mut m = HealthMonitor::new(t);
+        assert_eq!(
+            observe(&mut m, t, "802.1X Authorization success!").state,
+            LinkState::Connecting
+        );
+        observe(
+            &mut m,
+            t + Duration::from_secs(20),
+            "Send error: os error 10022",
+        );
+        observe(
+            &mut m,
+            t + Duration::from_secs(30),
+            "Fatal error at UDP Process thread! Will try restart in 15 second(s).",
+        );
+        observe(
+            &mut m,
+            t + Duration::from_secs(45),
+            "Waiting SUCCESS message from EAP.",
+        );
+        for s in (46..=182).step_by(2) {
+            let d = observe(
+                &mut m,
+                t + Duration::from_secs(s),
+                if s % 60 == 0 {
+                    "Send Heartbeat(Response, Identity) packet."
+                } else {
+                    ""
+                },
+            );
+            assert_ne!(d.state, LinkState::Online);
+            assert!(!d.stable);
+            assert_eq!(d.restart_stalled, s > 180);
+        }
+    }
+    #[test]
+    fn eap_heartbeats_cannot_hide_lost_udp_heartbeats_after_resume() {
+        let t = Instant::now();
+        let mut m = HealthMonitor::new(t);
+        observe(&mut m, t, "Heartbeat done.");
+        assert!(!observe(&mut m, t + Duration::from_secs(3600), "").restart_stalled);
+        for s in (3602..=3782).step_by(2) {
+            let d = observe(
+                &mut m,
+                t + Duration::from_secs(s),
+                if s % 60 == 0 {
+                    "Send Heartbeat(Response, Identity) packet."
+                } else {
+                    ""
+                },
+            );
+            assert_eq!(d.restart_stalled, s > 3780);
+        }
     }
     #[test]
     fn scheduled_wait_survives_the_night_without_respawn() {
