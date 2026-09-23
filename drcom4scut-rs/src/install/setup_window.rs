@@ -539,6 +539,8 @@ unsafe fn cancel(hwnd: HWND, s: &mut State) {
     }
 }
 unsafe fn tick(hwnd: HWND, s: &mut State) {
+    let mut needs_refresh = false;
+    
     if let Ok(status) = s.detection.try_recv() {
         s.driver_text = if status == DriverStatus::Available {
             "已检测到兼容的 x64 驱动，安装时将直接使用。"
@@ -546,22 +548,34 @@ unsafe fn tick(hwnd: HWND, s: &mut State) {
             "未检测到可用的 x64 驱动，安装时将自动下载并安装。"
         }
         .into();
-        refresh(hwnd);
+        needs_refresh = true;
     }
+    
     let Some((dir, rx)) = &s.work else {
+        if needs_refresh {
+            refresh(hwnd);
+        }
         return;
     };
+    
     if !s.cancelling {
         if let Ok(raw) = std::fs::read(dir.join("status.json")) {
             if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&raw) {
-                s.percent = v["percent"].as_u64().unwrap_or(0).min(100) as u32;
-                if let Some(m) = v["message"].as_str() {
-                    s.message = m.into();
+                let new_percent = v["percent"].as_u64().unwrap_or(0).min(100) as u32;
+                let new_message = v["message"].as_str().map(String::from);
+                
+                // 只在有变化时刷新
+                if new_percent != s.percent || new_message.as_ref() != Some(&s.message) {
+                    s.percent = new_percent;
+                    if let Some(m) = new_message {
+                        s.message = m;
+                    }
+                    needs_refresh = true;
                 }
-                refresh(hwnd);
             }
         }
     }
+    
     let completed = match rx.try_recv() {
         Ok(r) => Some(r),
         Err(mpsc::TryRecvError::Disconnected) => {
@@ -569,6 +583,7 @@ unsafe fn tick(hwnd: HWND, s: &mut State) {
         }
         Err(_) => None,
     };
+    
     if let Some(completed) = completed {
         let result = completed
             .and_then(|_| {
@@ -584,6 +599,8 @@ unsafe fn tick(hwnd: HWND, s: &mut State) {
         }
         let _ = EnableWindow(s.primary, true);
         finish(hwnd, s, result);
+    } else if needs_refresh {
+        refresh(hwnd);
     }
 }
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {

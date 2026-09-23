@@ -108,6 +108,7 @@ impl<'a> Process<'a> {
                 .spawn(move || {
                     let duration = Duration::from_millis(interval as u64);
                     let mut cnt = 0;
+                    let mut consecutive_errors = 0;
                     loop {
                         if quit.load(Ordering::Relaxed) {
                             debug!("UDP-Receiver thread quit!");
@@ -116,9 +117,16 @@ impl<'a> Process<'a> {
                         if stop.load(Ordering::Relaxed) {
                             thread::park();
                         }
+                        // 检查 Socket 有效性
+                        if consecutive_errors > 5 && !socket.is_valid() {
+                            error!("UDP Socket appears invalid, signaling quit.");
+                            quit.store(true, Ordering::Release);
+                            return;
+                        }
                         match socket.receive() {
                             Ok(v) => {
                                 cnt = 0;
+                                consecutive_errors = 0;
                                 if tx.send(v).is_err() {
                                     error!("Unexpected! Receive channel is disconnected!");
                                     quit.store(true, Ordering::Release);
@@ -127,6 +135,7 @@ impl<'a> Process<'a> {
                             Err(e) => {
                                 error!("Receive error: {e}");
                                 cnt += 1;
+                                consecutive_errors += 1;
                                 if cnt > count {
                                     quit.store(true, Ordering::Release);
                                 } else {
@@ -312,13 +321,14 @@ impl<'a> Process<'a> {
                             Ok(x) => match x.state {
                                 State::Success => {
                                     info!("Receive SUCCESS from EAP.");
-                                    loop {
-                                        if let Ok(mut r) = data.try_write() {
+                                    match data.try_write_for(Duration::from_millis(100)) {
+                                        Ok(mut r) => {
                                             r.cks_md5 = x.data;
                                             info!("cks_md5(md5): {}", hex::encode(&r.cks_md5));
-                                            break;
                                         }
-                                        util::sleep();
+                                        Err(_) => {
+                                            error!("Failed to acquire write lock for cks_md5");
+                                        }
                                     }
                                     thread.unpark();
                                 }
@@ -395,12 +405,10 @@ impl<'a> Process<'a> {
                 HeaderType::MiscResponseAlive => {
                     self.cancel_resend();
                     info!("Receive MiscResponseAlive.");
-                    loop {
-                        if let Ok(mut r) = self.data.try_write() {
-                            r.flux = Vec::from(&raw[8..12]);
-                            break;
-                        }
-                        sleep();
+                    if let Ok(mut r) = self.data.try_write_for(Duration::from_millis(100)) {
+                        r.flux = Vec::from(&raw[8..12]);
+                    } else {
+                        error!("Failed to acquire write lock for flux data");
                     }
                     self.send_misc_info();
                 }
@@ -417,12 +425,10 @@ impl<'a> Process<'a> {
                     match HeartbeatType::from_vec(&raw[..]).0 {
                         2 => {
                             info!("Receive MiscHeartbeat2.");
-                            loop {
-                                if let Ok(mut r) = self.data.try_write() {
-                                    r.flux = Vec::from(&raw[16..20]);
-                                    break;
-                                }
-                                sleep();
+                            if let Ok(mut r) = self.data.try_write_for(Duration::from_millis(100)) {
+                                r.flux = Vec::from(&raw[16..20]);
+                            } else {
+                                error!("Failed to acquire write lock for heartbeat2 flux");
                             }
                             self.send_misc_heartbeat_3();
                         }
@@ -470,12 +476,10 @@ impl<'a> Process<'a> {
     fn on_response_info(&mut self, raw: Vec<u8>) {
         let mut v = raw[16..32].to_vec();
         decrypt_info(&mut v);
-        loop {
-            if let Ok(mut r) = self.data.try_write() {
-                r.decrypted_from_misc_response_info = v;
-                break;
-            }
-            sleep();
+        if let Ok(mut r) = self.data.try_write_for(Duration::from_millis(100)) {
+            r.decrypted_from_misc_response_info = v;
+        } else {
+            error!("Failed to acquire write lock for response info");
         }
         self.start_heartbeat_thread();
     }
@@ -525,8 +529,8 @@ impl<'a> Process<'a> {
         let data = &mut BytesMut::with_capacity(244);
         let settings = &self.settings;
         let fixed = &settings.data.misc_info;
-        loop {
-            if let Ok(mut dt) = self.data.try_write() {
+        match self.data.try_write_for(Duration::from_millis(100)) {
+            Ok(mut dt) => {
                 let cks = (MiscInfo {
                     mac: self.mac,
                     ip: self.ip,
@@ -549,9 +553,11 @@ impl<'a> Process<'a> {
                 info!("calculate cks and apply to md5.");
                 let cks_array = cks.to_le_bytes();
                 dt.cks_md5[..cks_array.len()].copy_from_slice(&cks_array);
-                break;
             }
-            sleep();
+            Err(_) => {
+                error!("Failed to acquire write lock for misc_info, using stale data");
+                return;
+            }
         }
         self.send(data.to_vec(), true)
     }
@@ -559,8 +565,8 @@ impl<'a> Process<'a> {
     fn send_misc_heartbeat_1(&mut self) {
         info!("Send MiscHeartbeat1.");
         let data = &mut BytesMut::with_capacity(40);
-        loop {
-            if let Ok(mut dt) = self.data.try_write() {
+        match self.data.try_write_for(Duration::from_millis(100)) {
+            Ok(mut dt) => {
                 dt.counter += 1;
                 dt.rnd = random_vec(2);
                 MiscHeartbeat1 {
@@ -569,9 +575,11 @@ impl<'a> Process<'a> {
                     flux: dt.flux.clone(),
                 }
                 .append_to(data);
-                break;
             }
-            sleep();
+            Err(_) => {
+                error!("Failed to acquire write lock for heartbeat1");
+                return;
+            }
         }
         self.send(data.to_vec(), true)
     }
@@ -579,8 +587,8 @@ impl<'a> Process<'a> {
     fn send_misc_heartbeat_3(&mut self) {
         info!("Send MiscHeartbeat3.");
         let data = &mut BytesMut::with_capacity(40);
-        loop {
-            if let Ok(mut dt) = self.data.try_write() {
+        match self.data.try_write_for(Duration::from_millis(100)) {
+            Ok(mut dt) => {
                 dt.counter += 1;
                 MiscHeartbeat3 {
                     counter: dt.counter,
@@ -589,9 +597,11 @@ impl<'a> Process<'a> {
                     ip: self.ip,
                 }
                 .append_to(data);
-                break;
             }
-            sleep();
+            Err(_) => {
+                error!("Failed to acquire write lock for heartbeat3");
+                return;
+            }
         }
         self.send(data.to_vec(), true)
     }
@@ -599,16 +609,18 @@ impl<'a> Process<'a> {
     fn send_alive(&mut self) {
         info!("Send Alive.");
         let data = &mut BytesMut::with_capacity(40);
-        loop {
-            if let Ok(dt) = self.data.try_read() {
+        match self.data.try_read_for(Duration::from_millis(100)) {
+            Ok(dt) => {
                 Alive {
                     cks_md5: dt.cks_md5.clone(),
                     decrypted_from_misc_response_info: dt.decrypted_from_misc_response_info.clone(),
                 }
                 .append_to(data);
-                break;
             }
-            sleep();
+            Err(_) => {
+                error!("Failed to acquire read lock for alive");
+                return;
+            }
         }
         self.send(data.to_vec(), true)
     }

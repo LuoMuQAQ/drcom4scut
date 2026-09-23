@@ -6,12 +6,24 @@ use chrono::{Local, NaiveTime};
 use pnet::datalink::MacAddr;
 use rand::random;
 
+const MICRO_SEC: Duration = Duration::from_micros(100);
 const MILLI_SEC: Duration = Duration::from_millis(10);
 const SEC: Duration = Duration::from_secs(1);
 
+/// 智能自旋等待：前几次 yield，然后短暂 sleep
+static SPIN_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 #[inline]
 pub fn sleep() {
-    std::thread::sleep(MILLI_SEC);
+    let count = SPIN_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if count < 10 {
+        std::thread::yield_now();
+    } else if count < 50 {
+        std::thread::sleep(MICRO_SEC);
+    } else {
+        std::thread::sleep(MILLI_SEC);
+        SPIN_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 #[inline]

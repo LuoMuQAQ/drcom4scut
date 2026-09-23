@@ -72,15 +72,19 @@ fn main() {
                 let mut device = device.clone();
                 if broke {
                     info!("Try get the property ethernet device.");
+                    let mut retry_delay = 1u64; // 从1秒开始
                     loop {
                         match device::get_device(Some(mac), Some(ip)) {
                             Ok(d) => {
                                 device = Arc::new(d);
+                                info!("Successfully reacquired ethernet device.");
                                 break;
                             }
                             Err(e) => {
-                                error!("Can't get ethernet device, try again in {} second(s) : {}", settings.reconnect, e);
-                                thread::sleep(Duration::from_secs(settings.reconnect));
+                                error!("Can't get ethernet device, try again in {} second(s) : {}", retry_delay, e);
+                                thread::sleep(Duration::from_secs(retry_delay));
+                                // 指数退避，最大15秒
+                                retry_delay = (retry_delay * 2).min(settings.reconnect);
                             }
                         }
                     }

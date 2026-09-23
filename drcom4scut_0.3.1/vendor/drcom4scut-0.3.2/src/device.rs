@@ -149,10 +149,20 @@ impl Device {
 
     pub fn send(&self, data: Vec<u8>) -> Result<()> {
         let mut sender = self.sender.borrow_mut();
+        let mut attempts = 0;
+        const MAX_ATTEMPTS: u32 = 100;
         loop {
             if let Some(r) = sender.send_to(&data[..], None) {
                 return r;
             }
+            attempts += 1;
+            if attempts >= MAX_ATTEMPTS {
+                return Err(Error::new(
+                    ErrorKind::TimedOut,
+                    format!("Send buffer busy after {} attempts", MAX_ATTEMPTS)
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_micros(100));
         }
     }
 

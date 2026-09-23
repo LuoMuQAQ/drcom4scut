@@ -54,13 +54,33 @@ pub fn resolve_dns(settings: &Settings) -> Option<(IpAddr, SocketAddr)> {
 }
 
 pub fn socket_bind(ip: IpAddr) -> Option<UdpSocket> {
+    use std::thread;
+    use std::time::Duration;
+    
     let mut port = 36144;
     let address = SocketAddr::new(ip, 61440);
+    let mut route_wait_attempts = 0;
+    const MAX_ROUTE_WAITS: u32 = 3;
+    
     loop {
         match UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port)) {
-            Ok(r) => {
-                if r.connect(address).is_ok() {
-                    return Some(r);
+            Ok(socket) => {
+                match socket.connect(address) {
+                    Ok(()) => return Some(socket),
+                    Err(e) => {
+                        // 区分错误类型：路由问题 vs 其他问题
+                        let is_route_error = e.raw_os_error()
+                            .map_or(false, |code| code == 10051 || code == 10065);
+                        
+                        if is_route_error && route_wait_attempts < MAX_ROUTE_WAITS {
+                            // 网络可能未就绪，等待后重试
+                            route_wait_attempts += 1;
+                            info!("Network route not ready (attempt {}), waiting...", route_wait_attempts);
+                            thread::sleep(Duration::from_millis(500 * route_wait_attempts as u64));
+                            continue;
+                        }
+                        // 端口绑定成功但连接失败，尝试下一个端口
+                    }
                 }
             }
             Err(_) => {
@@ -70,6 +90,10 @@ pub fn socket_bind(ip: IpAddr) -> Option<UdpSocket> {
             }
         }
         port += 1;
+        if port > 36144 + 1000 {
+            // 防止无限循环，尝试1000个端口后放弃
+            return None;
+        }
     }
 }
 
@@ -79,14 +103,30 @@ pub struct Socket {
 
 impl Socket {
     pub fn new(socket: UdpSocket) -> Socket {
+        // 设置读写超时，避免永久阻塞
+        let _ = socket.set_read_timeout(Some(std::time::Duration::from_secs(30)));
+        let _ = socket.set_write_timeout(Some(std::time::Duration::from_secs(5)));
         Socket { socket }
     }
 
     pub fn send(&self, data: Vec<u8>) -> io::Result<()> {
         let l = data.len();
         let mut n = 0;
+        let max_attempts = 3;
+        let mut attempts = 0;
         while n < l {
-            n += self.socket.send(&data[n..l])?;
+            match self.socket.send(&data[n..l]) {
+                Ok(sent) => {
+                    n += sent;
+                    attempts = 0;
+                }
+                Err(e) if attempts < max_attempts && Self::is_transient(&e) => {
+                    attempts += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
         }
         Ok(())
     }
@@ -96,5 +136,16 @@ impl Socket {
         let size = self.socket.recv(&mut buffer)?;
         let v = buffer[..size].to_vec();
         Ok(v)
+    }
+
+    fn is_transient(err: &io::Error) -> bool {
+        matches!(
+            err.kind(),
+            io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+        )
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.socket.local_addr().is_ok()
     }
 }
