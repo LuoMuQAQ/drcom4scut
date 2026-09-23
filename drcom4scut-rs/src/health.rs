@@ -26,6 +26,46 @@ pub struct HealthDecision {
     pub restart_stalled: bool,
     pub stable: bool,
     pub monitoring_unavailable: bool,
+    /// EAP 已成功。不代表 UDP 心跳健康，也不刷新停滞计时。
+    pub authenticated: bool,
+}
+
+/// 界面文案。颜色用 `state`，与健康监视器内部状态可以不同：
+/// EAP 已成功时对用户显示已连接，内部仍保持 Connecting，直到 UDP `Heartbeat done`。
+pub struct StatusView {
+    pub state: LinkState,
+    pub title: &'static str,
+    pub detail: &'static str,
+}
+
+pub fn status_view(decision: &HealthDecision) -> StatusView {
+    match decision.state {
+        LinkState::Online => StatusView {
+            state: LinkState::Online,
+            title: "已连接",
+            detail: "校园网认证成功",
+        },
+        LinkState::Degraded | LinkState::Error => StatusView {
+            state: LinkState::Degraded,
+            title: "正在恢复",
+            detail: "认证核心正在自动恢复连接",
+        },
+        LinkState::Waiting => StatusView {
+            state: LinkState::Waiting,
+            title: "等待开放",
+            detail: "当前时段禁止上网，核心将按服务器规则重试",
+        },
+        _ if decision.authenticated => StatusView {
+            state: LinkState::Online,
+            title: "已连接",
+            detail: "校园网已认证，正在维持连接",
+        },
+        _ => StatusView {
+            state: LinkState::Connecting,
+            title: "正在连接",
+            detail: "正在进行校园网认证",
+        },
+    }
 }
 impl HealthMonitor {
     pub fn new(now: Instant) -> Self {
@@ -122,6 +162,7 @@ impl HealthMonitor {
                     .last_health
                     .zip(self.healthy_since)
                     .is_some_and(|(latest, start)| latest.duration_since(start) >= STABLE),
+            authenticated: self.eap_authenticated,
         }
     }
 }
@@ -319,5 +360,65 @@ mod tests {
             let d = observe(&mut m, t + Duration::from_secs(s), "Heartbeat done");
             assert_eq!(d.stable, s == 242);
         }
+    }
+
+    #[test]
+    fn eap_success_displays_connected_but_does_not_count_as_udp_health() {
+        let t = Instant::now();
+        let mut m = HealthMonitor::new(t);
+        let pending = observe(&mut m, t, "");
+        assert!(!pending.authenticated);
+        assert_eq!(status_view(&pending).title, "正在连接");
+        assert_eq!(status_view(&pending).state, LinkState::Connecting);
+
+        let d = observe(&mut m, t, "802.1X Authorization success!");
+        assert_eq!(d.state, LinkState::Connecting);
+        assert!(d.authenticated);
+        let view = status_view(&d);
+        assert_eq!(view.state, LinkState::Online);
+        assert_eq!(view.title, "已连接");
+        assert_eq!(view.detail, "校园网已认证，正在维持连接");
+
+        for seconds in (2..=182).step_by(2) {
+            let line = if seconds % 60 == 0 {
+                "Send Heartbeat(Response, Identity) packet."
+            } else {
+                ""
+            };
+            let d = observe(&mut m, t + Duration::from_secs(seconds), line);
+            assert_eq!(d.state, LinkState::Connecting);
+            assert!(d.authenticated);
+            assert_eq!(status_view(&d).title, "已连接");
+            assert_eq!(d.restart_stalled, seconds > 180);
+        }
+    }
+
+    #[test]
+    fn displayed_connection_yields_to_udp_completion_waiting_and_recovery() {
+        let t = Instant::now();
+        let mut m = HealthMonitor::new(t);
+        let online = observe(&mut m, t, "Heartbeat done.");
+        assert_eq!(online.state, LinkState::Online);
+        assert_eq!(status_view(&online).detail, "校园网认证成功");
+
+        let mut waiting = HealthMonitor::new(t);
+        observe(&mut waiting, t, "802.1X Authorization success!");
+        let banned = observe(
+            &mut waiting,
+            t + Duration::from_secs(2),
+            "Will try reconnect at the next 7:00.",
+        );
+        assert_eq!(status_view(&banned).title, "等待开放");
+        assert_eq!(status_view(&banned).state, LinkState::Waiting);
+
+        let mut broken = HealthMonitor::new(t);
+        observe(&mut broken, t, "802.1X Authorization success!");
+        let failed = observe(
+            &mut broken,
+            t + Duration::from_secs(2),
+            "Fatal error at EAP Process thread!",
+        );
+        assert_eq!(status_view(&failed).title, "正在恢复");
+        assert_eq!(status_view(&failed).state, LinkState::Degraded);
     }
 }

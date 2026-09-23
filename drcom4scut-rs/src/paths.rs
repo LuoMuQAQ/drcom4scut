@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn runtime_dir_is_keyed_by_sha() {
-        let sha = "ce79e117d14d172cb172a7d2a8adb2c638eb32d952db28d8ce04602eb5445ec2";
+        let sha = "1838ad6c20c99d84d8a6d2ee603dda133a2314209b65ed9cdd31d0247c8f1052";
         let ctx = portable_context(Path::new(r"C:\tmp\app"), "S-1-5-21-1");
         set_context_for_test(ctx);
         let exe = core_exe(sha).unwrap();

@@ -10,7 +10,10 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 use windows::core::{PCWSTR, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows::Win32::Foundation::{
+    CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
+use windows::Win32::Security::SECURITY_ATTRIBUTES;
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
@@ -20,15 +23,18 @@ use windows::Win32::System::JobObjects::{
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use windows::Win32::System::Threading::{
-    CreateProcessW, ResumeThread, SetPriorityClass, TerminateProcess, WaitForSingleObject,
-    CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, HIGH_PRIORITY_CLASS,
-    PROCESS_INFORMATION, STARTUPINFOW,
+    CreateEventW, CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess,
+    InitializeProcThreadAttributeList, ResumeThread, SetEvent, SetPriorityClass, TerminateProcess,
+    UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED,
+    CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, HIGH_PRIORITY_CLASS,
+    LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+    STARTUPINFOEXW,
 };
 
 use crate::paths;
 
 /// 嵌入核心的 SHA-256（十六进制小写）。
-pub const CORE_SHA256: &str = "ce79e117d14d172cb172a7d2a8adb2c638eb32d952db28d8ce04602eb5445ec2";
+pub const CORE_SHA256: &str = "1838ad6c20c99d84d8a6d2ee603dda133a2314209b65ed9cdd31d0247c8f1052";
 
 /// 嵌入的核心可执行文件字节（编译期校验哈希，见 `ensure_core_extracted_to`）。
 pub const CORE_BYTES: &[u8] = include_bytes!("../resources/drcom4scut.exe");
@@ -148,6 +154,7 @@ fn write_file_atomically(target: &Path, bytes: &[u8]) -> io::Result<()> {
 
 /// 组装命令行：`"核心路径" --config "配置路径"`。路径一律加引号以防空格。
 /// 凭据绝不进入命令行，只经环境变量传递。
+#[cfg(test)]
 fn build_command_line(core_path: &Path, config_path: &Path) -> String {
     build_command_line_with_extra(core_path, config_path, &[])
 }
@@ -168,10 +175,20 @@ fn build_command_line_with_extra(core_path: &Path, config_path: &Path, extra: &[
 
 /// 组建 UTF-16 环境块：继承 `base` 全部变量并覆盖 `DRCOM_USERNAME` / `DRCOM_PASSWORD`。
 /// 键统一大写后按名称排序（Windows 环境块惯例），双 NUL 结尾。
+#[cfg(test)]
 fn build_env_block(
     username: &str,
     password: &str,
     base: impl IntoIterator<Item = (String, String)>,
+) -> Vec<u16> {
+    build_env_block_with(username, password, base, None)
+}
+
+fn build_env_block_with(
+    username: &str,
+    password: &str,
+    base: impl IntoIterator<Item = (String, String)>,
+    binding: Option<(usize, usize)>,
 ) -> Vec<u16> {
     use std::collections::BTreeMap;
     // Windows 环境变量名不区分大小写，统一大写键以便覆盖同名变量。
@@ -181,6 +198,10 @@ fn build_env_block(
     }
     vars.insert("DRCOM_USERNAME".to_string(), username.to_string());
     vars.insert("DRCOM_PASSWORD".to_string(), password.to_string());
+    if let Some((parent, shutdown)) = binding {
+        vars.insert("DRCOM_PARENT_HANDLE".to_string(), parent.to_string());
+        vars.insert("DRCOM_SHUTDOWN_EVENT".to_string(), shutdown.to_string());
+    }
     let system_root = std::env::var_os("SystemRoot")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
@@ -208,12 +229,15 @@ fn to_wide_null(value: &OsStr) -> Vec<u16> {
 // 核心进程管理
 // ---------------------------------------------------------------------------
 
-/// 受管核心进程：持有 Job Object 与进程句柄，Drop 时关闭句柄。
-/// Job 设置了 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`，句柄关闭即兜底终止核心。
+/// 受管核心进程。核心自己也持有一份 Job 句柄，因此只关闭 GUI 侧句柄不会立刻杀掉它；
+/// `stop` 先发停止事件，让核心发出 EAPOL-Logoff 后再退出。超时仍用 `TerminateJobObject`。
 pub struct OwnedCore {
     job_handle: HANDLE,
     process_handle: HANDLE,
+    shutdown_event: HANDLE,
+    parent_handle: HANDLE,
     pid: u32,
+    stopped: bool,
 }
 
 impl OwnedCore {
@@ -233,26 +257,42 @@ impl OwnedCore {
         unsafe { WaitForSingleObject(self.process_handle, 0) == WAIT_TIMEOUT }
     }
 
-    /// 终止核心及其全部子进程（退出码 0），并限时等待退出。
-    /// 返回 true 表示已确认退出；false 表示终止调用失败或等待超时
-    /// （Drop 时的 KILL_ON_JOB_CLOSE 仍会兜底终止）。
+    /// 通知核心下线并退出。返回 true 表示已确认退出。
+    /// 核心在限时内没有退出时，再终止整个作业。
     pub fn stop(&mut self) -> bool {
+        if self.stopped {
+            return !self.is_running();
+        }
+        self.stopped = true;
+        if !self.is_running() {
+            return true;
+        }
+        // SAFETY: shutdown_event 与 process_handle 均由本对象持有且仍然打开。
+        let _ = unsafe { SetEvent(self.shutdown_event) };
+        if unsafe { WaitForSingleObject(self.process_handle, CORE_STOP_TIMEOUT_MS) }
+            == WAIT_OBJECT_0
+        {
+            return true;
+        }
         // SAFETY: job_handle 为本对象创建并持有的有效 Job 句柄。
         if unsafe { TerminateJobObject(self.job_handle, 0) }.is_err() {
             return false;
         }
-        // SAFETY: process_handle 为本对象持有的有效进程句柄，限时等待退出。
         unsafe { WaitForSingleObject(self.process_handle, CORE_STOP_TIMEOUT_MS) == WAIT_OBJECT_0 }
     }
 }
 
 impl Drop for OwnedCore {
     fn drop(&mut self) {
-        // SAFETY: 两个句柄均由本对象创建/接收，且只会在此关闭一次。
+        if !self.stopped {
+            let _ = self.stop();
+        }
+        // SAFETY: 句柄均由本对象创建，且只会在此关闭一次。
         unsafe {
             let _ = CloseHandle(self.process_handle);
-            // 关闭最后一个 Job 句柄时，KILL_ON_JOB_CLOSE 终止核心全部进程。
             let _ = CloseHandle(self.job_handle);
+            let _ = CloseHandle(self.shutdown_event);
+            let _ = CloseHandle(self.parent_handle);
         }
     }
 }
@@ -283,26 +323,138 @@ fn create_kill_on_close_job() -> windows::core::Result<HANDLE> {
     Ok(job)
 }
 
-/// 启动中途失败的清理：终止刚创建的挂起进程并关闭全部相关句柄。
-///
-/// # 前提
-/// `info` 的句柄必须来自本次成功的 `CreateProcessW` 且尚未被关闭。
-fn abort_launch(job: Option<HANDLE>, info: &PROCESS_INFORMATION) {
-    // SAFETY: 句柄由刚成功的 CreateProcessW 返回，调用方保证尚未关闭、只处理一次。
-    unsafe {
-        let _ = TerminateProcess(info.hProcess, 1);
-        let _ = CloseHandle(info.hThread);
-        let _ = CloseHandle(info.hProcess);
-        if let Some(job) = job {
-            let _ = CloseHandle(job);
+const SYNCHRONIZE: u32 = 0x0010_0000;
+
+fn close_handle(handle: HANDLE) {
+    if !handle.0.is_null() {
+        unsafe {
+            let _ = CloseHandle(handle);
         }
+    }
+}
+
+/// 把 `source` 复制成当前进程里可继承、只有 `SYNCHRONIZE` 权限的句柄。
+fn inheritable_synchronize(source: HANDLE) -> io::Result<HANDLE> {
+    let mut duplicated = HANDLE::default();
+    // SAFETY: source 由调用方保证有效；输出句柄由调用方关闭。
+    unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            source,
+            GetCurrentProcess(),
+            &mut duplicated,
+            SYNCHRONIZE,
+            true,
+            DUPLICATE_HANDLE_OPTIONS_NONE,
+        )
+    }
+    .map_err(|e| io::Error::other(format!("复制进程句柄失败：{e}")))?;
+    Ok(duplicated)
+}
+
+/// `windows` 0.61 的 `DUPLICATE_HANDLE_OPTIONS` 没有公开零值常量。
+const DUPLICATE_HANDLE_OPTIONS_NONE: windows::Win32::Foundation::DUPLICATE_HANDLE_OPTIONS =
+    windows::Win32::Foundation::DUPLICATE_HANDLE_OPTIONS(0);
+
+fn inheritable_event() -> io::Result<HANDLE> {
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: std::ptr::null_mut(),
+        bInheritHandle: true.into(),
+    };
+    // SAFETY: 安全属性指向栈上完整结构；匿名手动重置事件。
+    unsafe { CreateEventW(Some(&attributes), true, false, PCWSTR::null()) }
+        .map_err(|e| io::Error::other(format!("创建停止事件失败：{e}")))
+}
+
+fn inherit_attribute_list(
+    handles: &[HANDLE],
+) -> io::Result<(Vec<u8>, LPPROC_THREAD_ATTRIBUTE_LIST)> {
+    let mut bytes = 0usize;
+    // 第一次以空列表查询所需字节数，失败是预期结果。
+    let _ = unsafe { InitializeProcThreadAttributeList(None, 1, Some(0), &mut bytes) };
+    if bytes == 0 {
+        return Err(io::Error::other("无法计算进程属性列表大小"));
+    }
+    let mut buffer = vec![0u8; bytes];
+    let list = LPPROC_THREAD_ATTRIBUTE_LIST(buffer.as_mut_ptr().cast());
+    unsafe { InitializeProcThreadAttributeList(Some(list), 1, Some(0), &mut bytes) }
+        .map_err(|e| io::Error::other(format!("初始化进程属性列表失败：{e}")))?;
+    if let Err(e) = unsafe {
+        UpdateProcThreadAttribute(
+            list,
+            0,
+            PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+            Some(handles.as_ptr().cast()),
+            std::mem::size_of_val(handles),
+            None,
+            None,
+        )
+    } {
+        unsafe { DeleteProcThreadAttributeList(list) };
+        return Err(io::Error::other(format!("设置继承句柄失败：{e}")));
+    }
+    Ok((buffer, list))
+}
+
+struct LaunchCleanup {
+    parent: HANDLE,
+    event: HANDLE,
+    job: HANDLE,
+    info: PROCESS_INFORMATION,
+    attribute_list: Option<LPPROC_THREAD_ATTRIBUTE_LIST>,
+    kill_process: bool,
+}
+
+impl Drop for LaunchCleanup {
+    fn drop(&mut self) {
+        unsafe {
+            if self.kill_process && !self.info.hProcess.0.is_null() {
+                let _ = TerminateProcess(self.info.hProcess, 1);
+                let _ = CloseHandle(self.info.hThread);
+                let _ = CloseHandle(self.info.hProcess);
+            }
+            if let Some(list) = self.attribute_list.take() {
+                DeleteProcThreadAttributeList(list);
+            }
+        }
+        close_handle(self.job);
+        close_handle(self.parent);
+        close_handle(self.event);
+        self.job = HANDLE::default();
+        self.parent = HANDLE::default();
+        self.event = HANDLE::default();
+    }
+}
+
+impl LaunchCleanup {
+    fn finish(mut self) -> OwnedCore {
+        self.kill_process = false;
+        if let Some(list) = self.attribute_list.take() {
+            unsafe { DeleteProcThreadAttributeList(list) };
+        }
+        let _ = unsafe { CloseHandle(self.info.hThread) };
+        let owned = OwnedCore {
+            job_handle: self.job,
+            process_handle: self.info.hProcess,
+            shutdown_event: self.event,
+            parent_handle: self.parent,
+            pid: self.info.dwProcessId,
+            stopped: false,
+        };
+        self.job = HANDLE::default();
+        self.event = HANDLE::default();
+        self.parent = HANDLE::default();
+        self.info.hProcess = HANDLE::default();
+        self.info.hThread = HANDLE::default();
+        owned
     }
 }
 
 /// 启动核心：
 ///
-/// 1. `CreateProcessW(CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW)`；
-/// 2. 创建 KILL_ON_JOB_CLOSE 的 Job 并 `AssignProcessToJobObject`；
+/// 1. 继承 GUI 进程句柄和一张停止事件，挂起创建；
+/// 2. 加入 `KILL_ON_JOB_CLOSE` 作业，并把作业句柄复制进子进程，避免 GUI 句柄一关就杀掉核心；
 /// 3. `ResumeThread` 放行主线程，并提升为 High 优先级（对齐 .NET 版，失败忽略）。
 ///
 /// 命令行为 `"核心路径" --config "配置路径"`；凭据仅通过环境变量
@@ -324,78 +476,118 @@ pub fn spawn_with_args(
     password: &str,
     extra_args: &[String],
 ) -> io::Result<OwnedCore> {
+    let cwd = crate::paths::root().unwrap_or_else(|| PathBuf::from("."));
+    // SAFETY: 伪句柄只在本次复制中使用。
+    let parent = inheritable_synchronize(unsafe { GetCurrentProcess() })?;
+    launch_core(
+        core_path,
+        config_path,
+        username,
+        password,
+        extra_args,
+        &cwd,
+        parent,
+    )
+}
+
+fn launch_core(
+    core_path: &Path,
+    config_path: &Path,
+    username: &str,
+    password: &str,
+    extra_args: &[String],
+    cwd: &Path,
+    parent: HANDLE,
+) -> io::Result<OwnedCore> {
+    let event = match inheritable_event() {
+        Ok(event) => event,
+        Err(error) => {
+            close_handle(parent);
+            return Err(error);
+        }
+    };
+    let mut cleanup = LaunchCleanup {
+        parent,
+        event,
+        job: HANDLE::default(),
+        info: PROCESS_INFORMATION::default(),
+        attribute_list: None,
+        kill_process: false,
+    };
+    let inherited = [cleanup.parent, cleanup.event];
+    let (attribute_buffer, attribute_list) = inherit_attribute_list(&inherited)?;
+    cleanup.attribute_list = Some(attribute_list);
+    // 缓冲必须活到 CreateProcess 返回；属性列表指向其中。
+    let _attribute_buffer = attribute_buffer;
+
     let command_line = build_command_line_with_extra(core_path, config_path, extra_args);
-    // CreateProcessW 可能就地改写命令行缓冲，必须提供可写缓冲。
     let mut cmd_wide: Vec<u16> = command_line
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
     let app_wide = to_wide_null(core_path.as_os_str());
-    let env_block = build_env_block(
+    let env_block = build_env_block_with(
         username,
         password,
         std::env::vars_os()
             .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))),
+        Some((cleanup.parent.0 as usize, cleanup.event.0 as usize)),
     );
+    let cwd_wide = to_wide_null(cwd.as_os_str());
+    let mut startup = STARTUPINFOEXW::default();
+    startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+    startup.lpAttributeList = attribute_list;
 
-    // 工作目录固定为用户数据根，使核心相对路径 `./logs` 落到对应用户的 logs 目录。
-    let cwd_wide = crate::paths::root()
-        .map(|p| to_wide_null(p.as_os_str()))
-        .unwrap_or_else(|| vec![0]);
-
-    let mut startup = STARTUPINFOW::default();
-    startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
-    let mut info = PROCESS_INFORMATION::default();
-
-    // SAFETY: 应用名/命令行/环境块指针均指向存活至调用结束的有效缓冲区；
-    // CREATE_SUSPENDED 保证进程在加入 Job 之前不会执行任何代码。
+    // SAFETY: 命令行、环境块、工作目录和属性列表都活到本次调用结束。
+    // 句柄列表只包含父进程句柄和停止事件。CREATE_SUSPENDED 保证加入作业前不执行代码。
     unsafe {
         CreateProcessW(
             PCWSTR(app_wide.as_ptr()),
             Some(PWSTR(cmd_wide.as_mut_ptr())),
             None,
             None,
-            false,
-            CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
+            true,
+            CREATE_SUSPENDED
+                | CREATE_UNICODE_ENVIRONMENT
+                | CREATE_NO_WINDOW
+                | EXTENDED_STARTUPINFO_PRESENT,
             Some(env_block.as_ptr().cast()),
             PCWSTR(cwd_wide.as_ptr()),
-            &startup,
-            &mut info,
+            &startup.StartupInfo,
+            &mut cleanup.info,
         )
         .map_err(|e| io::Error::other(format!("启动核心进程失败：{e}")))?;
     }
+    cleanup.kill_process = true;
 
-    let job = match create_kill_on_close_job() {
-        Ok(job) => job,
-        Err(e) => {
-            abort_launch(None, &info);
-            return Err(io::Error::other(format!("创建 Job Object 失败：{e}")));
-        }
-    };
-
-    // SAFETY: job 与 info.hProcess 均为刚创建的有效句柄。
-    if let Err(e) = unsafe { AssignProcessToJobObject(job, info.hProcess) } {
-        abort_launch(Some(job), &info);
-        return Err(io::Error::other(format!("核心进程加入作业失败：{e}")));
+    cleanup.job = create_kill_on_close_job()
+        .map_err(|e| io::Error::other(format!("创建 Job Object 失败：{e}")))?;
+    // SAFETY: job 与进程句柄都刚创建且尚未关闭。
+    unsafe { AssignProcessToJobObject(cleanup.job, cleanup.info.hProcess) }
+        .map_err(|e| io::Error::other(format!("核心进程加入作业失败：{e}")))?;
+    let mut remote_job = HANDLE::default();
+    // SAFETY: 复制进子进程的句柄值只在子进程里有效，父进程不能关闭它。
+    unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            cleanup.job,
+            cleanup.info.hProcess,
+            &mut remote_job,
+            0,
+            false,
+            DUPLICATE_SAME_ACCESS,
+        )
     }
+    .map_err(|e| io::Error::other(format!("向核心复制作业句柄失败：{e}")))?;
+    let _ = remote_job;
 
-    // SAFETY: info.hThread 为 CreateProcessW 返回的挂起主线程句柄。
-    if unsafe { ResumeThread(info.hThread) } == u32::MAX {
-        abort_launch(Some(job), &info);
+    // SAFETY: hThread 是仍挂起的主线程。
+    if unsafe { ResumeThread(cleanup.info.hThread) } == u32::MAX {
         return Err(io::Error::other("恢复核心主线程失败"));
     }
-    // SAFETY: 主线程句柄用完即关，此后仅通过进程/作业句柄管理核心。
-    let _ = unsafe { CloseHandle(info.hThread) };
-
-    // 对齐 .NET 版 process.PriorityClass = High（失败忽略）。
-    // SAFETY: info.hProcess 为有效进程句柄。
-    let _ = unsafe { SetPriorityClass(info.hProcess, HIGH_PRIORITY_CLASS) };
-
-    Ok(OwnedCore {
-        job_handle: job,
-        process_handle: info.hProcess,
-        pid: info.dwProcessId,
-    })
+    // SAFETY: hProcess 为有效进程句柄；失败可以忽略。
+    let _ = unsafe { SetPriorityClass(cleanup.info.hProcess, HIGH_PRIORITY_CLASS) };
+    Ok(cleanup.finish())
 }
 
 // ---------------------------------------------------------------------------
@@ -448,6 +640,7 @@ mod tests {
     use windows::Win32::System::JobObjects::{
         JobObjectBasicProcessIdList, QueryInformationJobObject, JOBOBJECT_BASIC_PROCESS_ID_LIST,
     };
+    use windows::Win32::System::Threading::{GetExitCodeProcess, STARTUPINFOW};
 
     /// 测试用临时目录，Drop 时整体删除（即使断言失败也清理）。
     struct TempDirGuard(PathBuf);
@@ -601,6 +794,128 @@ mod tests {
         // SAFETY: 关闭本测试创建的 Job 句柄（作业内无进程，无终止副作用）。
         unsafe {
             let _ = CloseHandle(job);
+        }
+    }
+
+    #[test]
+    fn embedded_core_exits_when_watched_parent_dies() {
+        use std::os::windows::io::AsRawHandle;
+        let guard = TempDirGuard::new("parent-watch");
+        let exe = std::env::var_os("DRCOM_CORE_UNDER_TEST")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| ensure_core_extracted_to(&guard.0).unwrap());
+        let config = guard.0.join("config.yml");
+        let mut sleeper = std::process::Command::new(r"C:\Windows\System32\ping.exe")
+            .args(["-n", "60", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("应能启动替身父进程");
+        let raw = HANDLE(sleeper.as_raw_handle() as *mut std::ffi::c_void);
+        let parent = inheritable_synchronize(raw).expect("应能复制替身父进程句柄");
+        let core = launch_core(&exe, &config, "user", "pass", &[], &guard.0, parent)
+            .expect("应能启动核心");
+        let _ = sleeper.kill();
+        let exited = unsafe { WaitForSingleObject(core.process_handle(), 8_000) } == WAIT_OBJECT_0;
+        let mut code = 1u32;
+        if exited {
+            unsafe {
+                let _ = GetExitCodeProcess(core.process_handle(), &mut code);
+            }
+        }
+        assert!(exited, "核心应在被监视的父进程结束后退出");
+        assert_eq!(code, 0, "下线退出码应为 0");
+        let _ = sleeper.wait();
+    }
+
+    #[test]
+    fn shutdown_event_exits_core_before_the_hard_kill_timeout() {
+        use std::os::windows::io::AsRawHandle;
+        let guard = TempDirGuard::new("shutdown-event");
+        let exe = std::env::var_os("DRCOM_CORE_UNDER_TEST")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| ensure_core_extracted_to(&guard.0).unwrap());
+        let config = guard.0.join("config.yml");
+        let mut sleeper = std::process::Command::new(r"C:\Windows\System32\ping.exe")
+            .args(["-n", "60", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("应能启动替身父进程");
+        let raw = HANDLE(sleeper.as_raw_handle() as *mut std::ffi::c_void);
+        let parent = inheritable_synchronize(raw).expect("应能复制替身父进程句柄");
+        let mut core = launch_core(&exe, &config, "user", "pass", &[], &guard.0, parent)
+            .expect("应能启动核心");
+        let started = std::time::Instant::now();
+        assert!(core.stop(), "停止事件应让核心退出");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "优雅退出不应等到硬杀超时，实际 {:?}",
+            started.elapsed()
+        );
+        assert!(
+            sleeper.try_wait().ok().flatten().is_none(),
+            "停止核心不应结束替身父进程"
+        );
+        let _ = sleeper.kill();
+        let _ = sleeper.wait();
+    }
+
+    #[test]
+    fn child_holding_job_handle_survives_parent_closing_its_handle() {
+        let app = to_wide_null(std::ffi::OsStr::new(r"C:\Windows\System32\ping.exe"));
+        let mut cmd: Vec<u16> = r"C:\Windows\System32\ping.exe -n 30 127.0.0.1"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut startup = STARTUPINFOW::default();
+        startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        let mut info = PROCESS_INFORMATION::default();
+        unsafe {
+            CreateProcessW(
+                PCWSTR(app.as_ptr()),
+                Some(PWSTR(cmd.as_mut_ptr())),
+                None,
+                None,
+                false,
+                CREATE_SUSPENDED | CREATE_NO_WINDOW,
+                None,
+                PCWSTR::null(),
+                &startup,
+                &mut info,
+            )
+            .expect("启动 ping 应成功");
+        }
+        let job = create_kill_on_close_job().expect("创建作业应成功");
+        unsafe { AssignProcessToJobObject(job, info.hProcess).expect("ping 应能加入作业") };
+        let mut remote = HANDLE::default();
+        unsafe {
+            DuplicateHandle(
+                GetCurrentProcess(),
+                job,
+                info.hProcess,
+                &mut remote,
+                0,
+                false,
+                DUPLICATE_SAME_ACCESS,
+            )
+            .expect("应能把作业句柄复制进子进程");
+        }
+        assert_ne!(unsafe { ResumeThread(info.hThread) }, u32::MAX);
+        unsafe {
+            let _ = CloseHandle(info.hThread);
+            let _ = CloseHandle(job);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(
+            unsafe { WaitForSingleObject(info.hProcess, 0) },
+            WAIT_TIMEOUT,
+            "子进程持有作业句柄时，父进程关闭自己的句柄不应杀掉它"
+        );
+        unsafe {
+            let _ = TerminateProcess(info.hProcess, 0);
+            let _ = WaitForSingleObject(info.hProcess, 3_000);
+            let _ = CloseHandle(info.hProcess);
         }
     }
 }

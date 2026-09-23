@@ -182,3 +182,38 @@ pub(crate) const EAPOL_HEADER_LOGOFF: EAPOLHeader = EAPOLHeader {
     eapol_type: EAPOL_LOGOFF,
     length: 0,
 };
+
+/// EAPOL-Logoff 帧，补齐到与 `eap::Process::send` 相同的 96 字节。
+pub(crate) fn logoff_frame(source: MacAddr) -> Vec<u8> {
+    let mut data = BytesMut::with_capacity(96);
+    EthernetHeader {
+        destination: MacAddr(0x01, 0x80, 0xc2, 0x00, 0x00, 0x03),
+        source,
+        ethernet_type: ethernet_types::IEEE8021X,
+    }
+    .append_to(&mut data);
+    EAPOL_HEADER_LOGOFF.append_to(&mut data);
+    if data.len() < 96 {
+        data.resize(96, 0);
+    }
+    data.to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logoff_frame_is_padded_eapol_logoff() {
+        let frame = logoff_frame(MacAddr(0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff));
+        assert_eq!(frame.len(), 96);
+        assert_eq!(
+            &frame[..18],
+            &[
+                0x01, 0x80, 0xc2, 0x00, 0x00, 0x03, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x88, 0x8e,
+                0x01, 0x02, 0x00, 0x00,
+            ]
+        );
+        assert!(frame[18..].iter().all(|byte| *byte == 0));
+    }
+}

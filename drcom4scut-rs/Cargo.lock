@@ -132,7 +132,7 @@ dependencies = [
 
 [[package]]
 name = "drcom4scut-gui"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "resvg",
  "serde",

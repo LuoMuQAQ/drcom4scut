@@ -18,6 +18,7 @@ use crate::settings::Settings;
 use crate::util::{ChannelData, State, ip_to_vec, sleep};
 
 mod packet;
+pub(crate) use packet::logoff_frame;
 
 const MULTICAST_MAC: MacAddr = MacAddr(0x01, 0x80, 0xc2, 0x00, 0x00, 0x03);
 
@@ -534,11 +535,8 @@ impl Process<'_> {
 
     fn send_logoff(&mut self) {
         info!("Send Logoff packet.");
-        let data = &mut BytesMut::with_capacity(96);
         self.eth_header.destination = MULTICAST_MAC;
-        self.eth_header.append_to(data);
-        EAPOL_HEADER_LOGOFF.append_to(data);
-        self.send(data.to_vec(), false)
+        self.send(packet::logoff_frame(self.eth_header.source), false)
         // Failure
     }
 

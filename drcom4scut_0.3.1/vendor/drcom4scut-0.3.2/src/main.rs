@@ -4,6 +4,7 @@ mod eap;
 mod logger;
 mod settings;
 mod socket;
+mod supervisor;
 mod udp;
 mod util;
 
@@ -20,10 +21,12 @@ fn main() {
     let settings = &settings::SETTINGS;
 
     logger::init(settings);
+    supervisor::arm();
 
     info!("Start to run...");
     let device =
         device::get_device(settings.mac, settings.ip).expect("Fail on getting ethernet device!");
+    supervisor::set_logoff_mac(device.mac);
     info!("Ethernet Device: {}", &device.interface.name);
     info!("MAC address: {}", &device.mac);
     info!("IP Address/Prefix: {}", &device.ip_net);

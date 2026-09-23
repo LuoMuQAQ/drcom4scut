@@ -28,7 +28,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::controller::ReconnectBackoff;
 use crate::coreproc::{self, OwnedCore};
-use crate::health::HealthMonitor;
+use crate::health::{status_view, HealthMonitor};
 use crate::logtail::LogTail;
 use crate::model::{Adapter, LinkState, Settings};
 use crate::platform::{self, NpcapStatus};
@@ -1808,35 +1808,8 @@ unsafe fn on_timer(hwnd: HWND) {
         if decision.stable {
             app.backoff.reset();
         }
-        match decision.state {
-            LinkState::Online => {
-                apply_status(hwnd, LinkState::Online, "已连接", "校园网认证成功");
-            }
-            LinkState::Degraded | LinkState::Error => {
-                apply_status(
-                    hwnd,
-                    LinkState::Degraded,
-                    "正在恢复",
-                    "认证核心正在自动恢复连接",
-                );
-            }
-            LinkState::Waiting => {
-                apply_status(
-                    hwnd,
-                    LinkState::Waiting,
-                    "等待开放",
-                    "当前时段禁止上网，核心将按服务器规则重试",
-                );
-            }
-            _ => {
-                apply_status(
-                    hwnd,
-                    LinkState::Connecting,
-                    "正在连接",
-                    "正在进行校园网认证",
-                );
-            }
-        }
+        let view = status_view(&decision);
+        apply_status(hwnd, view.state, view.title, view.detail);
 
         if decision.monitoring_unavailable {
             apply_status(
