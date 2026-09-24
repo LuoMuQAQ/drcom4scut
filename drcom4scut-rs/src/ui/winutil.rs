@@ -91,8 +91,17 @@ pub fn font_as_gdi(h: HFONT) -> HGDIOBJ {
 
 /// 圆角填充矩形，可选 1px 描边。
 ///
-/// 不用 GDI 画笔（1px 笔是锯齿主因）：先铺描边色，再内缩 1px 铺填充色。
+/// 优先走 GDI+（抗锯齿）；GDI+ 不可用时回退到旧 GDI 实现：
+/// 不用 GDI 画笔（1px 笔是锯齿主因），先铺描边色，再内缩 1px 铺填充色。
 pub fn fill_round(hdc: HDC, r: RECT, radius: i32, fill: COLORREF, border: Option<COLORREF>) {
+    if crate::ui::gdiplus::fill_round(hdc, r, radius, fill, border) {
+        return;
+    }
+    fill_round_gdi(hdc, r, radius, fill, border)
+}
+
+/// 旧 GDI 回退实现（无抗锯齿）。
+fn fill_round_gdi(hdc: HDC, r: RECT, radius: i32, fill: COLORREF, border: Option<COLORREF>) {
     unsafe {
         use windows::Win32::Graphics::Gdi::{GetStockObject, NULL_PEN};
         let null_pen = GetStockObject(NULL_PEN);
