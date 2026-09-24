@@ -152,12 +152,29 @@ fn parent_temp_dir(process: windows::Win32::Foundation::HANDLE) -> Option<PathBu
     }
 }
 
+fn write_atomic(dir: &Path, name: &str, json: &str) {
+    use std::io::Write;
+    let target = dir.join(name);
+    let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+    let result: std::io::Result<()> = (|| {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(json.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, &target)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
 pub fn write_status(dir: &Path, json: &str) {
-    let _ = std::fs::write(dir.join("status.json"), json.as_bytes());
+    write_atomic(dir, "status.json", json);
 }
 
 pub fn write_result(dir: &Path, json: &str) {
-    let _ = std::fs::write(dir.join("result.json"), json.as_bytes());
+    write_atomic(dir, "result.json", json);
 }
 
 pub fn cancel_requested(dir: &Path) -> bool {
@@ -206,5 +223,32 @@ mod tests {
         let nonce = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let dir = PathBuf::from(r"C:\Windows\Temp\not-ours");
         assert!(verify_origin(&dir, nonce).is_err());
+    }
+
+    #[test]
+    fn write_status_and_result_atomic_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("test-origin-{}", new_nonce()));
+        let _ = std::fs::create_dir_all(&dir);
+
+        write_status(&dir, r#"{"percent":50}"#);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("status.json")).unwrap(),
+            r#"{"percent":50}"#
+        );
+
+        // overwrite
+        write_status(&dir, r#"{"percent":100}"#);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("status.json")).unwrap(),
+            r#"{"percent":100}"#
+        );
+
+        write_result(&dir, r#"{"ok":true}"#);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("result.json")).unwrap(),
+            r#"{"ok":true}"#
+        );
+
+        cleanup_origin(&dir);
     }
 }
