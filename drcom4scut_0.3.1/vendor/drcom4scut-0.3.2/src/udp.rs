@@ -580,10 +580,11 @@ impl<'a> Process<'a> {
                 }
                 alive.store(true, Ordering::Release);
                 thread::sleep(duration);
-                let mut cnt = timeout.load(Ordering::Relaxed);
+                let cnt = timeout.load(Ordering::Relaxed);
                 if cnt > count {
-                    error!("Heartbeat timeout. No Misc Heartbeat packet received for {}s, but ignored.", udp_timeout * cnt as i32);
-                    cnt = 0;
+                    error!("Heartbeat timeout. No Misc Heartbeat packet received for {}s. Restarting UDP process.", udp_timeout * cnt as i32);
+                    quit.store(true, Ordering::Release);
+                    return;
                 }
                 timeout.store(cnt + 1, Ordering::Release);
             }
