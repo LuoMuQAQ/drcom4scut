@@ -339,7 +339,7 @@ unsafe fn paint(hwnd: HWND, s: &State) {
         r(24, 28, 464, 36),
         "安装校园网客户端",
         COLOR_TEXT_PRIMARY,
-        DT_SINGLELINE,
+        DT_SINGLELINE | DT_END_ELLIPSIS,
     );
     text(
         mem,
@@ -347,7 +347,7 @@ unsafe fn paint(hwnd: HWND, s: &State) {
         r(24, 74, 512, 24),
         &format!("Windows x64  ·  版本 {}", env!("CARGO_PKG_VERSION")),
         COLOR_TEXT_SECONDARY,
-        DT_SINGLELINE,
+        DT_SINGLELINE | DT_END_ELLIPSIS,
     );
     if s.page == Page::Configure {
         fill_component(mem, r(24, 112, 512, 112), s.dpi, COLOR_CARD, None);
@@ -357,7 +357,7 @@ unsafe fn paint(hwnd: HWND, s: &State) {
             r(40, 126, 472, 24),
             "安装位置",
             COLOR_TEXT_PRIMARY,
-            DT_SINGLELINE,
+            DT_SINGLELINE | DT_END_ELLIPSIS,
         );
         fill_component(
             mem,
@@ -373,7 +373,7 @@ unsafe fn paint(hwnd: HWND, s: &State) {
             r(40, 250, 472, 24),
             "快捷方式与启动",
             COLOR_TEXT_PRIMARY,
-            DT_SINGLELINE,
+            DT_SINGLELINE | DT_END_ELLIPSIS,
         );
         fill_component(mem, r(24, 370, 512, 116), s.dpi, COLOR_CARD, None);
         text(
@@ -382,7 +382,7 @@ unsafe fn paint(hwnd: HWND, s: &State) {
             r(40, 386, 472, 24),
             "网络驱动 · 自动配置",
             COLOR_TEXT_PRIMARY,
-            DT_SINGLELINE,
+            DT_SINGLELINE | DT_END_ELLIPSIS,
         );
         text(
             mem,
@@ -390,7 +390,7 @@ unsafe fn paint(hwnd: HWND, s: &State) {
             r(40, 420, 472, 50),
             &s.driver_text,
             COLOR_TEXT_SECONDARY,
-            DT_WORDBREAK,
+            DT_WORDBREAK | DT_WORD_ELLIPSIS,
         );
         let note = if s.message.is_empty() {
             "缺少驱动时将自动下载并打开 Npcap 官方安装窗口。\n请按提示完成许可确认；客户端附带原生卸载程序。"
@@ -407,7 +407,7 @@ unsafe fn paint(hwnd: HWND, s: &State) {
             } else {
                 COLOR_DANGER
             },
-            DT_WORDBREAK,
+            DT_WORDBREAK | DT_WORD_ELLIPSIS,
         );
     } else {
         fill_component(mem, r(24, 112, 512, 374), s.dpi, COLOR_CARD, None);
@@ -432,7 +432,7 @@ unsafe fn paint(hwnd: HWND, s: &State) {
             r(40, 140, 472, 40),
             heading,
             COLOR_TEXT_PRIMARY,
-            DT_SINGLELINE,
+            DT_SINGLELINE | DT_END_ELLIPSIS,
         );
         text(
             mem,
@@ -440,7 +440,7 @@ unsafe fn paint(hwnd: HWND, s: &State) {
             r(40, 198, 472, 132),
             &s.message,
             COLOR_TEXT_SECONDARY,
-            DT_WORDBREAK,
+            DT_WORDBREAK | DT_WORD_ELLIPSIS,
         );
         text(
             mem,
@@ -448,7 +448,7 @@ unsafe fn paint(hwnd: HWND, s: &State) {
             r(40, 350, 472, 70),
             &format!("安装位置\n{}", s.options.install_dir.display()),
             COLOR_TEXT_SECONDARY,
-            DT_WORDBREAK,
+            DT_WORDBREAK | DT_WORD_ELLIPSIS,
         );
         fill_component(mem, r(40, 442, 472, 8), s.dpi, COLOR_STROKE, None);
         if s.percent > 0 {
@@ -471,7 +471,7 @@ unsafe fn paint(hwnd: HWND, s: &State) {
             r(24, 502, 512, 36),
             note,
             COLOR_TEXT_SECONDARY,
-            DT_WORDBREAK,
+            DT_WORDBREAK | DT_WORD_ELLIPSIS,
         );
     }
     let _ = BitBlt(
