@@ -516,7 +516,29 @@ impl<'a> Process<'a> {
         self.sleep.store(false, Ordering::Release);
         self.send_ts.store(0, Ordering::Release);
         info!("Waiting SUCCESS message from EAP.");
-        thread::park();
+        // Wait with a timeout: after a UDP rebuild EAP stays authenticated
+        // and never resends SUCCESS, so bail out and let the outer loop
+        // rebuild (the cached SUCCESS is re-injected on rebuild).
+        let started = Local::now();
+        loop {
+            thread::park_timeout(Duration::from_secs(30));
+            if self.quit.load(Ordering::Relaxed) {
+                return;
+            }
+            let ready = self
+                .data
+                .try_read()
+                .map(|d| !d.cks_md5.is_empty())
+                .unwrap_or(false);
+            if ready {
+                break;
+            }
+            if (Local::now() - started).num_seconds() >= 90 {
+                error!("Timed out waiting SUCCESS from EAP, restarting UDP process.");
+                self.quit.store(true, Ordering::Release);
+                return;
+            }
+        }
         self.send_misc_alive()
     }
 

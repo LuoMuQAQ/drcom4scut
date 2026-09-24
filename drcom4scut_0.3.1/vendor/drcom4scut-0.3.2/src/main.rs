@@ -60,8 +60,11 @@ fn main() {
     let mac = device.mac;
     let ip = device.ip_net.ip();
 
-    let (tx, rx) = crossbeam_channel::unbounded::<ChannelData>();
-    let tx1 = tx.clone();
+    let (eap_tx, eap_rx) = crossbeam_channel::unbounded::<ChannelData>();
+    let (udp_tx, udp_rx) = crossbeam_channel::unbounded::<ChannelData>();
+    // Cache the latest SUCCESS so it can be re-injected into a rebuilt UDP
+    // process (EAP never resends SUCCESS while it stays authenticated).
+    let last_success = Arc::new(std::sync::Mutex::new(None::<ChannelData>));
 
     let _eap_handle = thread::Builder::new()
         .name("EAP-Process-Generator".to_owned())
@@ -89,7 +92,7 @@ fn main() {
                         }
                     }
                 }
-                let tx = tx1.clone();
+                let tx = eap_tx.clone();
                 thread::Builder::new()
                     .name("EAP-Process".to_owned())
                     .spawn(move || {
@@ -135,19 +138,25 @@ fn main() {
             }
         })
         .expect("Can't create EAP Process generator thread!");
-    loop {
-        let rx_recv = rx.recv().expect("Unexpected! EAPtoUDP channel is closed.");
-        if let State::Success = rx_recv.state {
-            tx.send(rx_recv).expect("Can't send initial SUCCESS!");
-            break;
-        }
-    }
 
-    let udp_handle = thread::Builder::new()
+    let udp_handle = {
+        let last_success = last_success.clone();
+        let udp_tx = udp_tx.clone();
+        thread::Builder::new()
             .name("UDP-Process-Generator".to_owned())
             .spawn(move || {
                 loop {
-                    let rx = rx.clone();
+                    // Re-inject the cached SUCCESS before (re)building the UDP
+                    // process so it does not wait forever for a SUCCESS that
+                    // EAP will never resend while authenticated.
+                    if let Some(s) = last_success
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone()
+                    {
+                        let _ = udp_tx.send(s);
+                    }
+                    let rx = udp_rx.clone();
                     thread::Builder::new()
                         .name("UDP-Process".to_owned())
                         .spawn(move || {
@@ -211,7 +220,20 @@ fn main() {
                     thread::sleep(Duration::from_secs(settings.reconnect));
                 }
             })
-            .expect("Can't create UDP Process generator thread!");
+            .expect("Can't create UDP Process generator thread!")
+    };
+
+    // Forward EAP messages to the UDP process and cache the latest SUCCESS.
+    while let Ok(msg) = eap_rx.recv() {
+        if matches!(msg.state, State::Success) {
+            *last_success.lock().unwrap_or_else(|e| e.into_inner()) = Some(msg.clone());
+        }
+        if udp_tx.send(msg).is_err() {
+            error!("UDP channel is closed, quit forwarding.");
+            break;
+        }
+    }
+
     if udp_handle.join().is_err() {
         error!("Fatal error! UDP Process generator thread panicked!");
     }
