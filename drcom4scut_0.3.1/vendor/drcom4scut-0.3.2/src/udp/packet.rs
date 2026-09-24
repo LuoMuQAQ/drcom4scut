@@ -138,11 +138,11 @@ impl MiscInfo {
         data.put(&self.os_unknown[..]);
         // +16
 
-        let padding_len = 64 - self.version.len();
+        let padding_len = 64usize.saturating_sub(self.version.len());
         data.put(&self.version[..]);
         data.put(&[0u8].repeat(padding_len)[..]);
         // +64
-        let padding_len = 64 - self.hash.len();
+        let padding_len = 64usize.saturating_sub(self.hash.len());
         data.put(self.hash.as_bytes());
         data.put(&[0u8].repeat(padding_len)[..]);
         // +64

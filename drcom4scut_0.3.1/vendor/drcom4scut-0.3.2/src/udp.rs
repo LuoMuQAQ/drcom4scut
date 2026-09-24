@@ -405,6 +405,10 @@ impl<'a> Process<'a> {
                 HeaderType::MiscResponseAlive => {
                     self.cancel_resend();
                     info!("Receive MiscResponseAlive.");
+                    if raw.len() < 12 {
+                        error!("Short MiscResponseAlive packet (len={}), drop.", raw.len());
+                        continue;
+                    }
                     if let Ok(mut r) = self.data.try_write() {
                         r.flux = Vec::from(&raw[8..12]);
                     } else {
@@ -425,6 +429,10 @@ impl<'a> Process<'a> {
                     match HeartbeatType::from_vec(&raw[..]).0 {
                         2 => {
                             info!("Receive MiscHeartbeat2.");
+                            if raw.len() < 20 {
+                                error!("Short MiscHeartbeat2 packet (len={}), drop.", raw.len());
+                                continue;
+                            }
                             if let Ok(mut r) = self.data.try_write() {
                                 r.flux = Vec::from(&raw[16..20]);
                             } else {
@@ -474,6 +482,10 @@ impl<'a> Process<'a> {
     }
 
     fn on_response_info(&mut self, raw: Vec<u8>) {
+        if raw.len() < 32 {
+            error!("Short MiscResponseInfo packet (len={}), drop.", raw.len());
+            return;
+        }
         let mut v = raw[16..32].to_vec();
         decrypt_info(&mut v);
         if let Ok(mut r) = self.data.try_write() {

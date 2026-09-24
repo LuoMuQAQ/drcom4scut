@@ -261,7 +261,7 @@ impl Process<'_> {
 
     fn send(&self, data: Vec<u8>, resend: bool) {
         let mut data = data;
-        let l = 96 - data.len();
+        let l = 96usize.saturating_sub(data.len());
         if l > 0 {
             data.extend_from_slice(&[0u8].repeat(l));
         }
@@ -409,11 +409,15 @@ impl Process<'_> {
     }
 
     fn on_request_notification(&mut self, eap_header: &EAPHeader, bytes: &mut Bytes) -> bool {
-        if bytes.len() < (eap_header.length - 5) as usize {
+        let Some(payload_len) = (eap_header.length as usize).checked_sub(5) else {
+            error!("NOTIFICATION: EAP length < 5, drop.");
+            return false;
+        };
+        if bytes.len() < payload_len {
             error!("NOTIFICATION: Unexpected payload!");
         } else {
             self.cancel_resend();
-            match String::from_utf8(bytes.split_to((eap_header.length - 5) as usize).to_vec()) {
+            match String::from_utf8(bytes.split_to(payload_len).to_vec()) {
                 Ok(s) => {
                     error!("{s}");
                     if let Some(s) = s.strip_prefix("userid error") {
@@ -461,7 +465,11 @@ impl Process<'_> {
     }
 
     fn on_request_md5_challenge(&mut self, eap_header: &EAPHeader, bytes: &mut Bytes) {
-        if bytes.len() < (eap_header.length - 5) as usize {
+        let Some(payload_len) = (eap_header.length as usize).checked_sub(5) else {
+            error!("MD5 Challenge: EAP length < 5, drop.");
+            return;
+        };
+        if bytes.len() < payload_len {
             error!("MD5 Challenge: Unexpected payload!");
         } else {
             self.cancel_resend();
@@ -580,11 +588,22 @@ impl Process<'_> {
 
     fn send_response_md5_challenge(&mut self, eap_header: &EAPHeader, bytes: &mut Bytes) {
         info!("Send Response, MD5-Challenge packet.");
+        if bytes.is_empty() {
+            error!("MD5 Challenge: empty payload, drop.");
+            return;
+        }
         let md5_size = bytes.get_u8() as usize;
+        if bytes.len() < md5_size {
+            error!("MD5 Challenge: truncated md5 value, drop.");
+            return;
+        }
         let md5_value = bytes.split_to(md5_size).to_vec();
-        self.data.md5_extra_data = bytes
-            .split_to((eap_header.length as usize) - md5_size - 6)
-            .to_vec();
+        let Some(extra_len) = (eap_header.length as usize).checked_sub(md5_size + 6) else {
+            error!("MD5 Challenge: invalid length field, drop.");
+            return;
+        };
+        let extra_len = extra_len.min(bytes.len());
+        self.data.md5_extra_data = bytes.split_to(extra_len).to_vec();
         let md5 = &md5::Md5::digest(&{
             let mut not_encrypt =
                 BytesMut::with_capacity(1 + self.settings.password.len() + md5_value.len());
