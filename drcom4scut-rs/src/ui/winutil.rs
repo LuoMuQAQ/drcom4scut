@@ -2,7 +2,6 @@
 //!
 //! 配色值对齐 .NET 版 `App.xaml` 与 `MainWindow.xaml.cs:413-422`。
 
-use windows::core::w;
 use windows::Win32::Foundation::{COLORREF, RECT};
 use windows::Win32::Graphics::Gdi::{
     CreateFontW, CreateSolidBrush, DeleteObject, RoundRect, SelectObject, HBRUSH, HDC, HFONT,
@@ -165,43 +164,72 @@ pub fn scale(px: i32, dpi: u32) -> i32 {
     ((px as i64 * dpi as i64) / 96) as i32
 }
 
+fn font_installed(face: &[u16]) -> bool {
+    use windows::Win32::Foundation::LPARAM;
+    use windows::Win32::Graphics::Gdi::{
+        EnumFontFamiliesExW, GetDC, ReleaseDC, DEFAULT_CHARSET, LOGFONTW, TEXTMETRICW,
+    };
+
+    unsafe extern "system" fn enum_font_proc(
+        _elf: *const LOGFONTW,
+        _ntm: *const TEXTMETRICW,
+        _font_type: u32,
+        lparam: LPARAM,
+    ) -> i32 {
+        let found = &mut *(lparam.0 as *mut bool);
+        *found = true;
+        0
+    }
+
+    unsafe {
+        let hdc = GetDC(None);
+        let mut lf = LOGFONTW {
+            lfCharSet: DEFAULT_CHARSET,
+            ..Default::default()
+        };
+        let len = face.len().min(lf.lfFaceName.len() - 1);
+        lf.lfFaceName[..len].copy_from_slice(&face[..len]);
+        lf.lfFaceName[len] = 0;
+        let mut found = false;
+        let _ = EnumFontFamiliesExW(
+            hdc,
+            &lf,
+            Some(enum_font_proc),
+            LPARAM(&mut found as *mut bool as isize),
+            0,
+        );
+        let _ = ReleaseDC(None, hdc);
+        found
+    }
+}
+
+static FONT_FAMILY: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
+
 /// 创建 UI 字体。`px_size` 为 96 DPI 下的像素高度。
 ///
-/// 字体族对齐 .NET 版 `MainWindow.xaml:12`：Segoe UI Variable Text → Segoe UI →
-/// Microsoft YaHei UI，由系统 fallback 自行选择。
+/// 字体族探测 Segoe UI Variable Text → Segoe UI → Microsoft YaHei UI → MS Shell Dlg 2。
 pub fn create_font(px_size: i32, dpi: u32, semibold: bool) -> HFONT {
+    use windows::core::PCWSTR;
     use windows::Win32::Graphics::Gdi::{
         CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
     };
     let height = -scale(px_size, dpi);
-    // GDI 的 lfFaceName 只能写一个字体，不能写 CSS 式回退列表。
-    let names = [
-        w!("Segoe UI Variable Text"),
-        w!("Segoe UI"),
-        w!("Microsoft YaHei UI"),
-    ];
-    unsafe {
-        for name in names {
-            let h = CreateFontW(
-                height,
-                0,
-                0,
-                0,
-                if semibold { 600 } else { 400 },
-                0,
-                0,
-                0,
-                DEFAULT_CHARSET,
-                OUT_DEFAULT_PRECIS,
-                CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY,
-                0,
-                name,
-            );
-            if !h.is_invalid() {
-                return h;
+    let family = FONT_FAMILY.get_or_init(|| {
+        let candidates = [
+            "Segoe UI Variable Text",
+            "Segoe UI",
+            "Microsoft YaHei UI",
+            "MS Shell Dlg 2",
+        ];
+        for name in candidates {
+            let w = wide(name);
+            if font_installed(&w) {
+                return w;
             }
         }
+        wide("MS Shell Dlg 2")
+    });
+    unsafe {
         CreateFontW(
             height,
             0,
@@ -216,7 +244,7 @@ pub fn create_font(px_size: i32, dpi: u32, semibold: bool) -> HFONT {
             CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY,
             0,
-            w!("MS Shell Dlg 2"),
+            PCWSTR(family.as_ptr()),
         )
     }
 }
@@ -560,5 +588,42 @@ mod tests {
             pixel[2], pixel[3],
             "already-premultiplied red must not be multiplied again"
         );
+    }
+
+    #[test]
+    fn probe_font_fallback_chain() {
+        use windows::Win32::Graphics::Gdi::{DeleteObject, GetObjectW, HGDIOBJ, LOGFONTW};
+
+        let font = create_font(14, 96, false);
+        assert!(!font.0.is_null());
+        assert!(!font.is_invalid());
+
+        let mut lf = LOGFONTW::default();
+        let bytes_read = unsafe {
+            GetObjectW(
+                HGDIOBJ(font.0),
+                std::mem::size_of::<LOGFONTW>() as i32,
+                Some(&mut lf as *mut _ as *mut _),
+            )
+        };
+        assert!(bytes_read > 0);
+
+        let len = lf.lfFaceName.iter().position(|&c| c == 0).unwrap_or(lf.lfFaceName.len());
+        let face_name = String::from_utf16_lossy(&lf.lfFaceName[..len]);
+
+        let candidates = [
+            "Segoe UI Variable Text",
+            "Segoe UI",
+            "Microsoft YaHei UI",
+            "MS Shell Dlg 2",
+        ];
+        assert!(
+            candidates.contains(&face_name.as_str()),
+            "face_name '{face_name}' must be one of the candidates"
+        );
+
+        unsafe {
+            let _ = DeleteObject(HGDIOBJ(font.0));
+        }
     }
 }
