@@ -79,25 +79,32 @@ fn init_log4rs(settings: &Settings) {
     };
     let logfile = if settings.log.enable_file {
         let directory = &settings.log.file_directory;
-        Some(
-            RollingFileAppender::builder()
-                .encoder(Box::new(PatternEncoder::new(
-                    "[{d(%Y-%m-%d %H:%M:%S)}][{l}][{T}][{M}:{L}] {m}{n}",
-                )))
-                .build(
-                    directory.clone() + "/latest.log",
-                    Box::new(CompoundPolicy::new(
-                        Box::new(SizeTrigger::new(1 << 20)),
-                        Box::new(
-                            FixedWindowRoller::builder()
-                                .base(1)
-                                .build(&(directory.clone() + "/log-{}.gz"), 10)
-                                .expect("Can't build FixedWindowRoller!"),
-                        ),
-                    )),
-                )
-                .expect("Can't build RollingFileAppender!"),
-        )
+        if let Err(e) = std::fs::create_dir_all(directory) {
+            eprintln!("Can't create log directory '{directory}': {e}. File log disabled.");
+            None
+        } else {
+            let roller = FixedWindowRoller::builder()
+                .base(1)
+                .build(&(directory.clone() + "/log-{}.gz"), 10);
+            let appender = roller.ok().and_then(|roller| {
+                RollingFileAppender::builder()
+                    .encoder(Box::new(PatternEncoder::new(
+                        "[{d(%Y-%m-%d %H:%M:%S)}][{l}][{T}][{M}:{L}] {m}{n}",
+                    )))
+                    .build(
+                        directory.clone() + "/latest.log",
+                        Box::new(CompoundPolicy::new(
+                            Box::new(SizeTrigger::new(1 << 20)),
+                            Box::new(roller),
+                        )),
+                    )
+                    .ok()
+            });
+            if appender.is_none() {
+                eprintln!("Can't build RollingFileAppender in '{directory}'. File log disabled.");
+            }
+            appender
+        }
     } else {
         None
     };
