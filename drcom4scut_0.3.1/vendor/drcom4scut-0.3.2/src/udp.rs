@@ -416,6 +416,17 @@ impl<'a> Process<'a> {
                 self.start_heartbeat_thread();
                 return State::Quit;
             }
+            // Health check: a worker thread that finished without quit being
+            // set has died unexpectedly (e.g. panicked); rebuild the process.
+            if self.receiver_handle.as_ref().is_some_and(|h| h.is_finished())
+                || self.resender_handle.as_ref().is_some_and(|h| h.is_finished())
+                || self.sender_handle.as_ref().is_some_and(|h| h.is_finished())
+                || self.receiving_eap_handle.as_ref().is_some_and(|h| h.is_finished())
+            {
+                error!("Worker thread died unexpectedly, restarting UDP process.");
+                self.quit.store(true, Ordering::Release);
+                continue;
+            }
             if self
                 .alive
                 .compare_exchange(true, false, Ordering::Acquire, Ordering::Acquire)

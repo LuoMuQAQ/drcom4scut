@@ -317,6 +317,16 @@ impl Process<'_> {
                 }
                 return State::Quit;
             }
+            // Health check: a worker thread that finished without quit being
+            // set has died unexpectedly (e.g. panicked); quit and reconnect.
+            if self.receiver_handle.as_ref().is_some_and(|h| h.is_finished())
+                || self.resender_handle.as_ref().is_some_and(|h| h.is_finished())
+                || self.sender_handle.as_ref().is_some_and(|h| h.is_finished())
+            {
+                error!("Worker thread died unexpectedly, restarting EAP process.");
+                self.quit.store(true, Ordering::Release);
+                continue;
+            }
             let raw = match self.receive() {
                 Some(v) => v,
                 None => {
