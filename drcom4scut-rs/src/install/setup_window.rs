@@ -175,17 +175,7 @@ unsafe fn init(hwnd: HWND) -> State {
         let _ = tx.send(driver::detect_with(&driver::RealDriverHost));
     });
     SetTimer(Some(hwnd), 1, 150, None);
-    let region = CreateRoundRectRgn(
-        0,
-        0,
-        scale(560, dpi) + 1,
-        scale(608, dpi) + 1,
-        scale(16, dpi),
-        scale(16, dpi),
-    );
-    if SetWindowRgn(hwnd, Some(region), true) == 0 {
-        delete_gdi(HGDIOBJ(region.0));
-    }
+    ui::round_corners(hwnd);
     State {
         dpi,
         font,

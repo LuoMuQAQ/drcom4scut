@@ -7,15 +7,16 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, SetBkMode, SetTextColor, TextOutW, PAINTSTRUCT, TRANSPARENT,
 };
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW,
-    GetWindowLongPtrW, GetWindowTextW, LoadCursorW, MessageBoxW, PostQuitMessage, RegisterClassW,
-    SendMessageW, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage,
-    CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HMENU, HWND_TOP, IDC_ARROW, MB_ICONWARNING, MB_OK,
-    MB_OKCANCEL, MSG, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CREATE,
-    WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONDOWN,
-    WM_PAINT, WM_SETFONT, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_EX_APPWINDOW, WS_OVERLAPPED,
-    WS_POPUP, WS_TABSTOP, WS_VISIBLE,
+    GetWindowLongPtrW, GetWindowTextW, LoadCursorW, LoadIconW, MessageBoxW, PostQuitMessage,
+    RegisterClassW, SendMessageW, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
+    TranslateMessage, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HMENU, HWND_TOP, IDC_ARROW,
+    MB_ICONWARNING, MB_OK, MB_OKCANCEL, MSG, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE,
+    WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY,
+    WM_ERASEBKGND, WM_LBUTTONDOWN, WM_PAINT, WM_SETFONT, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN,
+    WS_EX_APPWINDOW, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
 use crate::install::{APP_DISPLAY_NAME, APP_VERSION};
@@ -263,14 +264,39 @@ pub fn register_class(
     name: PCWSTR,
     wndproc: windows::Win32::UI::WindowsAndMessaging::WNDPROC,
 ) -> bool {
+    // Icon resource ID 1 is embedded into every binary by build.rs (windres).
+    let icon = unsafe {
+        let instance = GetModuleHandleW(None).unwrap_or_default();
+        LoadIconW(Some(instance.into()), PCWSTR(1 as *const u16)).unwrap_or_default()
+    };
     let wc = WNDCLASSW {
         style: CS_HREDRAW | CS_VREDRAW,
         lpfnWndProc: wndproc,
         hCursor: unsafe { LoadCursorW(None, IDC_ARROW).unwrap_or_default() },
+        hIcon: icon,
         lpszClassName: name,
         ..Default::default()
     };
     unsafe { RegisterClassW(&wc) != 0 }
+}
+
+/// Ask DWM for anti-aliased rounded corners (Windows 11+; silently ignored
+/// elsewhere, falling back to square corners). Same approach as the main
+/// window; replaces the jagged SetWindowRgn hard clipping.
+pub fn round_corners(hwnd: HWND) {
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmSetWindowAttribute(
+            hwnd: HWND,
+            attr: u32,
+            value: *const core::ffi::c_void,
+            size: u32,
+        ) -> i32;
+    }
+    let pref: i32 = 2; // DWMWCP_ROUND
+    unsafe {
+        let _ = DwmSetWindowAttribute(hwnd, 33, (&pref as *const i32).cast(), 4);
+    }
 }
 
 pub fn create_popup(
@@ -293,7 +319,7 @@ pub fn create_popup(
             WS_EX_APPWINDOW,
             class,
             PCWSTR(t.as_ptr()),
-            WS_POPUP | WS_CLIPCHILDREN | WINDOW_STYLE(WS_VISIBLE.0),
+            WS_POPUP | WS_SYSMENU | WS_CLIPCHILDREN | WINDOW_STYLE(WS_VISIBLE.0),
             x,
             y,
             cw,

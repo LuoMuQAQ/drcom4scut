@@ -14,9 +14,9 @@ use drcom4scut_gui::ui::winutil::*;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateRoundRectRgn, DeleteDC,
+    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC,
     DrawFocusRect, DrawTextW, EndPaint, FillRect, InflateRect, SelectObject, SetBkMode,
-    SetTextColor, SetWindowRgn, DRAW_TEXT_FORMAT, DT_CENTER, DT_NOPREFIX, DT_SINGLELINE,
+    SetTextColor, DRAW_TEXT_FORMAT, DT_CENTER, DT_NOPREFIX, DT_SINGLELINE,
     DT_VCENTER, DT_WORDBREAK, HDC, HFONT, HGDIOBJ, PAINTSTRUCT, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{DRAWITEMSTRUCT, ODS_FOCUS, ODS_SELECTED};
@@ -381,17 +381,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             font,
         );
         owner_button(hwnd, CLOSE, rect(dpi, 428, 16, 28, 28), "×", font);
-        let region = CreateRoundRectRgn(
-            0,
-            0,
-            scale(WIDTH, dpi) + 1,
-            scale(HEIGHT, dpi) + 1,
-            scale(16, dpi),
-            scale(16, dpi),
-        );
-        if SetWindowRgn(hwnd, Some(region), true) == 0 {
-            delete_gdi(HGDIOBJ(region.0));
-        }
+        ui::round_corners(hwnd);
         let state = Box::new(UnUi {
             dpi,
             font,
