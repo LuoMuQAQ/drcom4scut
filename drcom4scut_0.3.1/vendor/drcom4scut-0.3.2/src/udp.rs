@@ -21,6 +21,22 @@ use crate::util::{self, ChannelData, State, random_vec, sleep};
 
 mod packet;
 
+/// Try to acquire a write lock with a short backoff. Silently skipping the
+/// update on contention (the old behavior) can leave stale or empty protocol
+/// state behind and cause panics or malformed packets later.
+fn write_with_retry<T>(
+    lock: &RwLock<T>,
+    attempts: u32,
+) -> Option<std::sync::RwLockWriteGuard<'_, T>> {
+    for i in 0..attempts {
+        if let Ok(g) = lock.try_write() {
+            return Some(g);
+        }
+        thread::sleep(Duration::from_millis(1 + i as u64));
+    }
+    None
+}
+
 #[derive(Default, Debug, PartialEq, Eq, Hash, Clone)]
 struct ProcessData {
     counter: u8,
@@ -344,12 +360,12 @@ impl<'a> Process<'a> {
                             Ok(x) => match x.state {
                                 State::Success => {
                                     info!("Receive SUCCESS from EAP.");
-                                    match data.try_write() {
-                                        Ok(mut r) => {
+                                    match write_with_retry(&data, 10) {
+                                        Some(mut r) => {
                                             r.cks_md5 = x.data;
                                             info!("cks_md5(md5): {}", hex::encode(&r.cks_md5));
                                         }
-                                        Err(_) => {
+                                        None => {
                                             error!("Failed to acquire write lock for cks_md5");
                                         }
                                     }
@@ -432,7 +448,7 @@ impl<'a> Process<'a> {
                         error!("Short MiscResponseAlive packet (len={}), drop.", raw.len());
                         continue;
                     }
-                    if let Ok(mut r) = self.data.try_write() {
+                    if let Some(mut r) = write_with_retry(&self.data, 10) {
                         r.flux = Vec::from(&raw[8..12]);
                     } else {
                         error!("Failed to acquire write lock for flux data");
@@ -456,7 +472,7 @@ impl<'a> Process<'a> {
                                 error!("Short MiscHeartbeat2 packet (len={}), drop.", raw.len());
                                 continue;
                             }
-                            if let Ok(mut r) = self.data.try_write() {
+                            if let Some(mut r) = write_with_retry(&self.data, 10) {
                                 r.flux = Vec::from(&raw[16..20]);
                             } else {
                                 error!("Failed to acquire write lock for heartbeat2 flux");
@@ -511,7 +527,7 @@ impl<'a> Process<'a> {
         }
         let mut v = raw[16..32].to_vec();
         decrypt_info(&mut v);
-        if let Ok(mut r) = self.data.try_write() {
+        if let Some(mut r) = write_with_retry(&self.data, 10) {
             r.decrypted_from_misc_response_info = v;
         } else {
             error!("Failed to acquire write lock for response info");
@@ -564,8 +580,8 @@ impl<'a> Process<'a> {
         let data = &mut BytesMut::with_capacity(244);
         let settings = &self.settings;
         let fixed = &settings.data.misc_info;
-        match self.data.try_write() {
-            Ok(mut dt) => {
+        match write_with_retry(&self.data, 10) {
+            Some(mut dt) => {
                 let cks = (MiscInfo {
                     mac: self.mac,
                     ip: self.ip,
@@ -587,9 +603,16 @@ impl<'a> Process<'a> {
                 .append_to(data);
                 info!("calculate cks and apply to md5.");
                 let cks_array = cks.to_le_bytes();
+                if dt.cks_md5.len() < cks_array.len() {
+                    error!(
+                        "cks_md5 not ready (len={}), skip misc_info.",
+                        dt.cks_md5.len()
+                    );
+                    return;
+                }
                 dt.cks_md5[..cks_array.len()].copy_from_slice(&cks_array);
             }
-            Err(_) => {
+            None => {
                 error!("Failed to acquire write lock for misc_info, using stale data");
                 return;
             }
@@ -600,8 +623,8 @@ impl<'a> Process<'a> {
     fn send_misc_heartbeat_1(&mut self) {
         info!("Send MiscHeartbeat1.");
         let data = &mut BytesMut::with_capacity(40);
-        match self.data.try_write() {
-            Ok(mut dt) => {
+        match write_with_retry(&self.data, 10) {
+            Some(mut dt) => {
                 dt.counter += 1;
                 dt.rnd = random_vec(2);
                 MiscHeartbeat1 {
@@ -611,7 +634,7 @@ impl<'a> Process<'a> {
                 }
                 .append_to(data);
             }
-            Err(_) => {
+            None => {
                 error!("Failed to acquire write lock for heartbeat1");
                 return;
             }
@@ -622,8 +645,8 @@ impl<'a> Process<'a> {
     fn send_misc_heartbeat_3(&mut self) {
         info!("Send MiscHeartbeat3.");
         let data = &mut BytesMut::with_capacity(40);
-        match self.data.try_write() {
-            Ok(mut dt) => {
+        match write_with_retry(&self.data, 10) {
+            Some(mut dt) => {
                 dt.counter += 1;
                 MiscHeartbeat3 {
                     counter: dt.counter,
@@ -633,7 +656,7 @@ impl<'a> Process<'a> {
                 }
                 .append_to(data);
             }
-            Err(_) => {
+            None => {
                 error!("Failed to acquire write lock for heartbeat3");
                 return;
             }
@@ -646,6 +669,10 @@ impl<'a> Process<'a> {
         let data = &mut BytesMut::with_capacity(40);
         match self.data.try_read() {
             Ok(dt) => {
+                if dt.cks_md5.is_empty() || dt.decrypted_from_misc_response_info.is_empty() {
+                    error!("Alive data not ready, skip this alive packet.");
+                    return;
+                }
                 Alive {
                     cks_md5: dt.cks_md5.clone(),
                     decrypted_from_misc_response_info: dt.decrypted_from_misc_response_info.clone(),
