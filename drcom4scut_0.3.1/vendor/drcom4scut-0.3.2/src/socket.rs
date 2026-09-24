@@ -71,13 +71,18 @@ pub fn socket_bind(ip: IpAddr) -> Option<UdpSocket> {
                         // 区分错误类型：路由问题 vs 其他问题
                         let is_route_error = e.raw_os_error()
                             .map_or(false, |code| code == 10051 || code == 10065);
-                        
-                        if is_route_error && route_wait_attempts < MAX_ROUTE_WAITS {
-                            // 网络可能未就绪，等待后重试
-                            route_wait_attempts += 1;
-                            info!("Network route not ready (attempt {}), waiting...", route_wait_attempts);
-                            thread::sleep(Duration::from_millis(500 * route_wait_attempts as u64));
-                            continue;
+
+                        if is_route_error {
+                            if route_wait_attempts < MAX_ROUTE_WAITS {
+                                // 网络可能未就绪，等待后重试
+                                route_wait_attempts += 1;
+                                info!("Network route not ready (attempt {}), waiting...", route_wait_attempts);
+                                thread::sleep(Duration::from_millis(500 * route_wait_attempts as u64));
+                                continue;
+                            }
+                            // 路由仍不可达：扫描端口没有意义，直接放弃
+                            error!("Network route not ready after {MAX_ROUTE_WAITS} attempts, give up.");
+                            return None;
                         }
                         // 端口绑定成功但连接失败，尝试下一个端口
                     }

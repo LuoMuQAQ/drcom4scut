@@ -423,6 +423,28 @@ impl Settings {
                 }
             }
         }
+        // Clamp dangerous values: zero/negative timings turn retry loops
+        // into 100% CPU hot loops, and negative counts wrap when cast.
+        if settings.reconnect == 0 {
+            error!("Invalid config: reconnect must be >= 1, fallback to 1.");
+            settings.reconnect = 1;
+        }
+        if settings.retry.count < 0 {
+            error!("Invalid config: retry.count must be >= 0, fallback to 2.");
+            settings.retry.count = 2;
+        }
+        if settings.retry.interval < 1 {
+            error!("Invalid config: retry.interval must be >= 1, fallback to 5000.");
+            settings.retry.interval = 5000;
+        }
+        if settings.heartbeat.eap_timeout < 1 {
+            error!("Invalid config: heartbeat.eap_timeout must be >= 1, fallback to 60.");
+            settings.heartbeat.eap_timeout = 60;
+        }
+        if settings.heartbeat.udp_timeout < 1 {
+            error!("Invalid config: heartbeat.udp_timeout must be >= 1, fallback to 12.");
+            settings.heartbeat.udp_timeout = 12;
+        }
         settings
     }
     pub fn parse(matches: &ArgMatches) -> Settings {

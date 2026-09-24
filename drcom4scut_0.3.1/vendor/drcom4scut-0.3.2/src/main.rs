@@ -103,13 +103,8 @@ fn main() {
                             match eap_process.start() {
                                 State::Sleep => {
                                     error!("Will try reconnect at the next {}.", settings.time);
-                                    if sleep_at(settings.time).is_some() {
-                                        continue;
-                                    }
-                                    error!(
-                                        "Can't create a valid DateTime! Will try reconnect in {} second(s).",
-                                        settings.reconnect
-                                    );
+                                    sleep_at(settings.time);
+                                    continue;
                                 }
                                 State::Quit => {
                                     break;
@@ -191,10 +186,8 @@ fn main() {
                                             "Will try restart UDP heartbeat at the next {}.",
                                             settings.time
                                         );
-                                        if sleep_at(settings.time).is_some() {
-                                            continue;
-                                        }
-                                        error!("Can't create a valid DateTime! Will try reconnect in {} second(s).", settings.reconnect);
+                                        sleep_at(settings.time);
+                                        continue;
                                     }
                                     State::Quit => {
                                         break;
