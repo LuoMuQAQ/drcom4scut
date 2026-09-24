@@ -132,6 +132,18 @@ impl<'a> Process<'a> {
                                     quit.store(true, Ordering::Release);
                                 }
                             }
+                            Err(e)
+                                if matches!(
+                                    e.kind(),
+                                    std::io::ErrorKind::TimedOut
+                                        | std::io::ErrorKind::WouldBlock
+                                ) =>
+                            {
+                                // Read timeout just means 30s of silence, not an
+                                // error. Keep waiting without counting it.
+                                debug!("Receive timeout (idle), keep waiting.");
+                                continue;
+                            }
                             Err(e) => {
                                 error!("Receive error: {e}");
                                 cnt += 1;
@@ -186,6 +198,17 @@ impl<'a> Process<'a> {
                             thread::sleep(Duration::from_millis(wait_ts as u64));
                         } else if wait_ts > -interval as i64 {
                             debug!("Resending...");
+                            cancel_resend.store(true, Ordering::Release);
+                            if tx.send((Vec::new(), true)).is_err() {
+                                error!("Unexpected! Send channel is disconnected!");
+                                quit.store(true, Ordering::Release);
+                            }
+                        } else {
+                            // wait_ts <= -interval: system slept or clock jumped,
+                            // reset the base timestamp and resend immediately
+                            // instead of busy-spinning.
+                            debug!("Clock jump detected, resending immediately...");
+                            send_ts.store(Local::now().timestamp_millis(), Ordering::Release);
                             cancel_resend.store(true, Ordering::Release);
                             if tx.send((Vec::new(), true)).is_err() {
                                 error!("Unexpected! Send channel is disconnected!");

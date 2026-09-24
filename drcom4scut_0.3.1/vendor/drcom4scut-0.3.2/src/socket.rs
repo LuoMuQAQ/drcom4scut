@@ -146,6 +146,7 @@ impl Socket {
     }
 
     pub fn is_valid(&self) -> bool {
-        self.socket.local_addr().is_ok()
+        // local_addr() stays valid on a broken socket; SO_ERROR is a real probe.
+        matches!(self.socket.take_error(), Ok(None))
     }
 }

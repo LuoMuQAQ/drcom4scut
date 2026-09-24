@@ -170,6 +170,17 @@ impl Process<'_> {
                                 error!("Unexpected! Send channel is disconnected!");
                                 quit.store(true, Ordering::Release);
                             }
+                        } else {
+                            // wait_ts <= -interval: system slept or clock jumped,
+                            // reset the base timestamp and resend immediately
+                            // instead of busy-spinning.
+                            debug!("Clock jump detected, resending immediately...");
+                            send_ts.store(Local::now().timestamp_millis(), Ordering::Release);
+                            cancel_resend.store(true, Ordering::Release);
+                            if tx.send((Vec::new(), true)).is_err() {
+                                error!("Unexpected! Send channel is disconnected!");
+                                quit.store(true, Ordering::Release);
+                            }
                         }
                     }
                 })
