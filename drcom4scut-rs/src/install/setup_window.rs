@@ -19,7 +19,7 @@ use windows::{
         Graphics::Gdi::*,
         UI::{
             Controls::{DRAWITEMSTRUCT, ODS_FOCUS, ODS_SELECTED},
-            Input::KeyboardAndMouse::{EnableWindow, SetFocus},
+            Input::KeyboardAndMouse::{EnableWindow, SetFocus, TrackMouseEvent, TRACKMOUSEEVENT, TRACKMOUSEEVENT_FLAGS},
             WindowsAndMessaging::*,
         },
     },
@@ -28,6 +28,8 @@ use windows::{
 const PRIMARY: isize = 3001;
 const SECONDARY: isize = 3002;
 const CLOSE: isize = 3003;
+const TME_LEAVE: TRACKMOUSEEVENT_FLAGS = TRACKMOUSEEVENT_FLAGS(0x2);
+const WM_MOUSELEAVE: u32 = 0x02A3;
 #[derive(PartialEq)]
 enum Page {
     Configure,
@@ -50,6 +52,7 @@ struct State {
     primary: HWND,
     secondary: HWND,
     close: HWND,
+    hot: isize,
     page: Page,
     options: InstallOptions,
     detection: Receiver<DriverStatus>,
@@ -179,6 +182,22 @@ unsafe fn layout_controls(s: &State, dpi: u32) {
         SWP_NOZORDER | SWP_NOACTIVATE,
     );
 }
+unsafe fn invalidate_button(hwnd: HWND, s: &State, id: isize) {
+    let btn = match id {
+        PRIMARY => s.primary,
+        SECONDARY => s.secondary,
+        CLOSE => s.close,
+        ui::ID_BROWSE => s.browse,
+        _ => return,
+    };
+    let _ = InvalidateRect(Some(btn), None, false);
+    let mut rc = RECT::default();
+    if GetWindowRect(btn, &mut rc).is_ok() {
+        let points = std::slice::from_raw_parts_mut(&mut rc as *mut _ as *mut POINT, 2);
+        let _ = MapWindowPoints(None, Some(hwnd), points);
+        let _ = InvalidateRect(Some(hwnd), Some(&rc), false);
+    }
+}
 unsafe fn init(hwnd: HWND) -> State {
     let dpi = window_dpi(hwnd);
     let font = create_font(14, dpi, false);
@@ -273,6 +292,7 @@ unsafe fn init(hwnd: HWND) -> State {
         primary,
         secondary,
         close,
+        hot: 0,
         page: Page::Configure,
         options,
         detection,
@@ -723,8 +743,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             let _ = FillRect(d.hDC, &d.rcItem, background);
             delete_gdi(brush_as_gdi(background));
             let accent = d.CtlID == PRIMARY as u32;
+            let hot = s.hot == d.CtlID as isize;
             let fill = if accent {
-                if d.itemState.0 & ODS_SELECTED.0 != 0 {
+                if d.itemState.0 & ODS_SELECTED.0 != 0 || hot {
                     COLOR_ACCENT_HOVER
                 } else {
                     COLOR_ACCENT
@@ -737,7 +758,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 d.rcItem,
                 s.dpi,
                 fill,
-                if accent { None } else { Some(COLOR_STROKE) },
+                if accent {
+                    None
+                } else if hot {
+                    Some(COLOR_STROKE_HOVER)
+                } else {
+                    Some(COLOR_STROKE)
+                },
             );
             text(
                 d.hDC,
@@ -753,8 +780,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             );
             if d.itemState.0 & ODS_FOCUS.0 != 0 {
                 let mut r = d.rcItem;
-                let _ = InflateRect(&mut r, -scale(4, s.dpi), -scale(4, s.dpi));
-                let _ = DrawFocusRect(d.hDC, &r);
+                let _ = InflateRect(&mut r, -scale(3, s.dpi), -scale(3, s.dpi));
+                fill_round(
+                    d.hDC,
+                    r,
+                    component_radius(r.bottom - r.top, s.dpi),
+                    fill,
+                    Some(COLOR_ACCENT),
+                );
             }
             LRESULT(1)
         }
@@ -850,6 +883,72 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     delete_gdi(font_as_gdi(old));
                 }
                 layout_controls(s, new_dpi);
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            let pt = POINT {
+                x: (lp.0 & 0xffff) as i16 as i32,
+                y: ((lp.0 >> 16) & 0xffff) as i16 as i32,
+            };
+            let child = ChildWindowFromPoint(hwnd, pt);
+            let hot = if child == s.primary && IsWindowVisible(s.primary).as_bool() {
+                PRIMARY
+            } else if child == s.secondary && IsWindowVisible(s.secondary).as_bool() {
+                SECONDARY
+            } else if child == s.close && IsWindowVisible(s.close).as_bool() {
+                CLOSE
+            } else if child == s.browse && IsWindowVisible(s.browse).as_bool() {
+                ui::ID_BROWSE
+            } else {
+                0
+            };
+            if hot != s.hot {
+                let old = s.hot;
+                s.hot = hot;
+                invalidate_button(hwnd, s, old);
+                invalidate_button(hwnd, s, hot);
+            }
+            let mut tme = TRACKMOUSEEVENT {
+                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: hwnd,
+                dwHoverTime: 0,
+            };
+            let _ = TrackMouseEvent(&mut tme);
+            LRESULT(0)
+        }
+        WM_SETCURSOR => {
+            if ((lp.0 >> 16) & 0xffff) as u32 == WM_MOUSEMOVE {
+                let child = HWND(wp.0 as *mut _);
+                let hot = if child == s.primary && IsWindowVisible(s.primary).as_bool() {
+                    PRIMARY
+                } else if child == s.secondary && IsWindowVisible(s.secondary).as_bool() {
+                    SECONDARY
+                } else if child == s.close && IsWindowVisible(s.close).as_bool() {
+                    CLOSE
+                } else if child == s.browse && IsWindowVisible(s.browse).as_bool() {
+                    ui::ID_BROWSE
+                } else {
+                    0
+                };
+                if hot != s.hot {
+                    let old = s.hot;
+                    s.hot = hot;
+                    invalidate_button(hwnd, s, old);
+                    invalidate_button(hwnd, s, hot);
+                }
+            }
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
+        WM_MOUSELEAVE => {
+            let mut pt = POINT::default();
+            let _ = GetCursorPos(&mut pt);
+            let mut rect = RECT::default();
+            let _ = GetWindowRect(hwnd, &mut rect);
+            if !PtInRect(&rect, pt).as_bool() {
+                s.hot = 0;
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
             LRESULT(0)

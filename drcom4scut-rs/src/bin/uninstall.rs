@@ -12,23 +12,31 @@ use drcom4scut_gui::install::UNINSTALL_MUTEX_NAME;
 use drcom4scut_gui::platform::{self, AlreadyRunning};
 use drcom4scut_gui::ui::winutil::*;
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC,
-    DrawFocusRect, DrawTextW, EndPaint, FillRect, InflateRect, InvalidateRect, SelectObject, SetBkMode,
-    SetTextColor, DRAW_TEXT_FORMAT, DT_CENTER, DT_NOPREFIX, DT_SINGLELINE,
-    DT_VCENTER, DT_WORDBREAK, HDC, HFONT, HGDIOBJ, PAINTSTRUCT, SRCCOPY, TRANSPARENT,
+    DrawTextW, EndPaint, FillRect, InflateRect, InvalidateRect, MapWindowPoints, PtInRect,
+    SelectObject, SetBkMode, SetTextColor, DRAW_TEXT_FORMAT, DT_CENTER, DT_NOPREFIX,
+    DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, HDC, HFONT, HGDIOBJ, PAINTSTRUCT, SRCCOPY,
+    TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{DRAWITEMSTRUCT, ODS_FOCUS, ODS_SELECTED};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    TrackMouseEvent, TRACKMOUSEEVENT, TRACKMOUSEEVENT_FLAGS,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    DefWindowProcW, DestroyWindow, GetClientRect, GetWindowLongPtrW, GetWindowLongPtrW as GetStyle,
-    PostQuitMessage, SendMessageW, SetWindowLongPtrW, SetWindowLongPtrW as SetStyle, SetWindowPos,
-    GWLP_USERDATA, GWL_STYLE, HTCAPTION, SWP_NOACTIVATE, SWP_NOZORDER, WM_CLOSE, WM_COMMAND,
-    WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND,
-    WM_LBUTTONDOWN, WM_NCLBUTTONDOWN, WM_PAINT,
+    ChildWindowFromPoint, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos,
+    GetWindowLongPtrW, GetWindowLongPtrW as GetStyle, GetWindowRect, IsWindowVisible,
+    PostQuitMessage, SendMessageW, SetWindowLongPtrW, SetWindowLongPtrW as SetStyle,
+    SetWindowPos, GWLP_USERDATA, GWL_STYLE, HTCAPTION, SWP_NOACTIVATE, SWP_NOZORDER,
+    WM_CLOSE, WM_COMMAND, WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED,
+    WM_DRAWITEM, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCLBUTTONDOWN, WM_PAINT,
+    WM_SETCURSOR,
 };
 
 const CLOSE: isize = 3003;
+const TME_LEAVE: TRACKMOUSEEVENT_FLAGS = TRACKMOUSEEVENT_FLAGS(0x2);
+const WM_MOUSELEAVE: u32 = 0x02A3;
 const WIDTH: i32 = 480;
 const HEIGHT: i32 = 340;
 
@@ -246,6 +254,23 @@ struct UnUi {
     btn_ok: HWND,
     btn_cancel: HWND,
     btn_close: HWND,
+    hot: isize,
+}
+
+unsafe fn invalidate_button(hwnd: HWND, s: &UnUi, id: isize) {
+    let btn = match id {
+        ui::ID_OK => s.btn_ok,
+        ui::ID_CANCEL => s.btn_cancel,
+        CLOSE => s.btn_close,
+        _ => return,
+    };
+    let _ = InvalidateRect(Some(btn), None, false);
+    let mut rc = RECT::default();
+    if GetWindowRect(btn, &mut rc).is_ok() {
+        let points = std::slice::from_raw_parts_mut(&mut rc as *mut _ as *mut POINT, 2);
+        let _ = MapWindowPoints(None, Some(hwnd), points);
+        let _ = InvalidateRect(Some(hwnd), Some(&rc), false);
+    }
 }
 
 unsafe fn layout_controls(s: &UnUi, dpi: u32) {
@@ -427,6 +452,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             btn_ok,
             btn_cancel,
             btn_close,
+            hot: 0,
         });
         layout_controls(&state, dpi);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(state) as isize);
@@ -455,8 +481,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let _ = FillRect(d.hDC, &d.rcItem, background);
             delete_gdi(brush_as_gdi(background));
             let uninstall = d.CtlID == ui::ID_OK as u32;
+            let hot = s.hot == d.CtlID as isize;
             let fill = if uninstall {
-                if d.itemState.0 & ODS_SELECTED.0 != 0 {
+                if d.itemState.0 & ODS_SELECTED.0 != 0 || hot {
                     COLOR_ACCENT_HOVER
                 } else {
                     COLOR_DANGER
@@ -469,7 +496,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 d.rcItem,
                 s.dpi,
                 fill,
-                if uninstall { None } else { Some(COLOR_STROKE) },
+                if uninstall {
+                    None
+                } else if hot {
+                    Some(COLOR_STROKE_HOVER)
+                } else {
+                    Some(COLOR_STROKE)
+                },
             );
             draw_text(
                 d.hDC,
@@ -485,8 +518,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             );
             if d.itemState.0 & ODS_FOCUS.0 != 0 {
                 let mut r = d.rcItem;
-                let _ = InflateRect(&mut r, -scale(4, s.dpi), -scale(4, s.dpi));
-                let _ = DrawFocusRect(d.hDC, &r);
+                let _ = InflateRect(&mut r, -scale(3, s.dpi), -scale(3, s.dpi));
+                fill_round(
+                    d.hDC,
+                    r,
+                    component_radius(r.bottom - r.top, s.dpi),
+                    fill,
+                    Some(COLOR_ACCENT),
+                );
             }
             LRESULT(1)
         }
@@ -539,6 +578,68 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     delete_gdi(font_as_gdi(old));
                 }
                 layout_controls(s, new_dpi);
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            let pt = POINT {
+                x: (lparam.0 & 0xffff) as i16 as i32,
+                y: ((lparam.0 >> 16) & 0xffff) as i16 as i32,
+            };
+            let child = ChildWindowFromPoint(hwnd, pt);
+            let hot = if child == s.btn_ok && IsWindowVisible(s.btn_ok).as_bool() {
+                ui::ID_OK
+            } else if child == s.btn_cancel && IsWindowVisible(s.btn_cancel).as_bool() {
+                ui::ID_CANCEL
+            } else if child == s.btn_close && IsWindowVisible(s.btn_close).as_bool() {
+                CLOSE
+            } else {
+                0
+            };
+            if hot != s.hot {
+                let old = s.hot;
+                s.hot = hot;
+                invalidate_button(hwnd, s, old);
+                invalidate_button(hwnd, s, hot);
+            }
+            let mut tme = TRACKMOUSEEVENT {
+                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: hwnd,
+                dwHoverTime: 0,
+            };
+            let _ = TrackMouseEvent(&mut tme);
+            LRESULT(0)
+        }
+        WM_SETCURSOR => {
+            if ((lparam.0 >> 16) & 0xffff) as u32 == WM_MOUSEMOVE {
+                let child = HWND(wparam.0 as *mut _);
+                let hot = if child == s.btn_ok && IsWindowVisible(s.btn_ok).as_bool() {
+                    ui::ID_OK
+                } else if child == s.btn_cancel && IsWindowVisible(s.btn_cancel).as_bool() {
+                    ui::ID_CANCEL
+                } else if child == s.btn_close && IsWindowVisible(s.btn_close).as_bool() {
+                    CLOSE
+                } else {
+                    0
+                };
+                if hot != s.hot {
+                    let old = s.hot;
+                    s.hot = hot;
+                    invalidate_button(hwnd, s, old);
+                    invalidate_button(hwnd, s, hot);
+                }
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_MOUSELEAVE => {
+            let mut pt = POINT::default();
+            let _ = GetCursorPos(&mut pt);
+            let mut rect = RECT::default();
+            let _ = GetWindowRect(hwnd, &mut rect);
+            if !PtInRect(&rect, pt).as_bool() {
+                s.hot = 0;
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
             LRESULT(0)
