@@ -22,6 +22,16 @@ pub(crate) use packet::logoff_frame;
 
 const MULTICAST_MAC: MacAddr = MacAddr(0x01, 0x80, 0xc2, 0x00, 0x00, 0x03);
 
+/// How to react to an EAP Notification message.
+enum NotificationAction {
+    /// Informational message only; keep the session alive.
+    Continue,
+    /// Fatal account/state problem; stop and reconnect later.
+    Stop,
+    /// Not allowed to access the internet now; sleep until next scheduled time.
+    Sleep,
+}
+
 #[derive(Default, Debug, PartialEq, Eq, Hash, Clone)]
 struct ProcessData {
     ip: Vec<u8>,
@@ -352,16 +362,22 @@ impl Process<'_> {
                                     self.on_request_identity(&eth_header, &eap_header)
                                 }
                                 EAPType::Notification => {
-                                    ret = self.on_request_notification(&eap_header, bytes); // sleep if true
-                                    if ret
-                                        && let Err(e) = self.tx.try_send(ChannelData {
-                                            state: State::Sleep,
-                                            data: Vec::new(),
-                                        })
-                                    {
-                                        error!("Can't send SLEEP message to UDP receiver. {e}");
+                                    match self.on_request_notification(&eap_header, bytes) {
+                                        NotificationAction::Sleep => {
+                                            ret = true;
+                                            if let Err(e) = self.tx.try_send(ChannelData {
+                                                state: State::Sleep,
+                                                data: Vec::new(),
+                                            }) {
+                                                error!("Can't send SLEEP message to UDP receiver. {e}");
+                                            }
+                                            self.stop.store(true, Ordering::Release);
+                                        }
+                                        NotificationAction::Stop => {
+                                            self.stop.store(true, Ordering::Release);
+                                        }
+                                        NotificationAction::Continue => {}
                                     }
-                                    self.stop.store(true, Ordering::Release);
                                 }
                                 EAPType::Md5Challenge => {
                                     self.on_request_md5_challenge(&eap_header, bytes)
@@ -419,60 +435,71 @@ impl Process<'_> {
         }
     }
 
-    fn on_request_notification(&mut self, eap_header: &EAPHeader, bytes: &mut Bytes) -> bool {
+    fn on_request_notification(
+        &mut self,
+        eap_header: &EAPHeader,
+        bytes: &mut Bytes,
+    ) -> NotificationAction {
         let Some(payload_len) = (eap_header.length as usize).checked_sub(5) else {
             error!("NOTIFICATION: EAP length < 5, drop.");
-            return false;
+            return NotificationAction::Continue;
         };
         if bytes.len() < payload_len {
             error!("NOTIFICATION: Unexpected payload!");
-        } else {
-            self.cancel_resend();
-            match String::from_utf8(bytes.split_to(payload_len).to_vec()) {
-                Ok(s) => {
-                    error!("{s}");
-                    if let Some(s) = s.strip_prefix("userid error") {
-                        if let Ok(x) = i32::from_str(s) {
-                            match x {
-                                1 => error!("Account does not exist."),
-                                2 | 3 => error!("Username or password invalid."),
-                                4 => error!("This account might be expended."),
-                                _ => (),
-                            }
-                        }
-                    } else if let Some(s) = s.strip_prefix("Authentication Fail ErrCode=") {
-                        if let Ok(x) = i32::from_str(s) {
-                            match x {
-                                0 => error!("Username or password invalid."),
-                                5 => error!("This account is suspended."),
-                                9 => error!("This account might be expended."),
-                                11 => error!(
-                                    "You are not allowed to perform a radius authentication."
-                                ),
-                                16 => {
-                                    error!("You are not allowed to access the internet now.");
-                                    return true;
-                                }
-                                30 | 63 => error!("No more time available for this account."),
-                                _ => (),
-                            }
-                        }
-                    } else if s.strip_prefix("AdminReset").is_some() {
-                        error!("AdminReset.")
-                    } else if s.strip_prefix("Mac, IP, NASip, PORT").is_some() {
-                        error!("You are not allowed to login using current IP/MAC address.")
-                    } else if s.strip_prefix("flowover").is_some() {
-                        error!("Data usage has reached the limit.")
-                    } else if s.strip_prefix("In use").is_some() {
-                        error!("This account is in use.")
-                    }
-                }
-                Err(_) => {
-                    error!("NOTIFICATION: Parse string failed!");
+            return NotificationAction::Continue;
+        }
+        self.cancel_resend();
+        let s = match String::from_utf8(bytes.split_to(payload_len).to_vec()) {
+            Ok(s) => s,
+            Err(_) => {
+                error!("NOTIFICATION: Parse string failed!");
+                return NotificationAction::Continue;
+            }
+        };
+        error!("{s}");
+        if let Some(s) = s.strip_prefix("userid error") {
+            if let Ok(x) = i32::from_str(s) {
+                match x {
+                    1 => error!("Account does not exist."),
+                    2 | 3 => error!("Username or password invalid."),
+                    4 => error!("This account might be expended."),
+                    _ => (),
                 }
             }
+            NotificationAction::Stop
+        } else if let Some(s) = s.strip_prefix("Authentication Fail ErrCode=") {
+            if let Ok(x) = i32::from_str(s) {
+                match x {
+                    0 => error!("Username or password invalid."),
+                    5 => error!("This account is suspended."),
+                    9 => error!("This account might be expended."),
+                    11 => error!(
+                        "You are not allowed to perform a radius authentication."
+                    ),
+                    16 => {
+                        error!("You are not allowed to access the internet now.");
+                        return NotificationAction::Sleep;
+                    }
+                    30 | 63 => error!("No more time available for this account."),
+                    _ => (),
+                }
+            }
+            NotificationAction::Stop
+        } else if s.strip_prefix("AdminReset").is_some() {
+            error!("AdminReset.");
+            NotificationAction::Stop
+        } else if s.strip_prefix("Mac, IP, NASip, PORT").is_some() {
+            error!("You are not allowed to login using current IP/MAC address.");
+            NotificationAction::Stop
+        } else if s.strip_prefix("flowover").is_some() {
+            error!("Data usage has reached the limit.");
+            NotificationAction::Continue
+        } else if s.strip_prefix("In use").is_some() {
+            error!("This account is in use.");
+            NotificationAction::Continue
+        } else {
+            NotificationAction::Continue
         }
-        false
     }
 
     fn on_request_md5_challenge(&mut self, eap_header: &EAPHeader, bytes: &mut Bytes) {
