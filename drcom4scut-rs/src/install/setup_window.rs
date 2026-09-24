@@ -43,11 +43,13 @@ struct State {
     field: HBRUSH,
     controls: Vec<HWND>,
     path: HWND,
+    browse: HWND,
     desktop: HWND,
     menu: HWND,
     launch: HWND,
     primary: HWND,
     secondary: HWND,
+    close: HWND,
     page: Page,
     options: InstallOptions,
     detection: Receiver<DriverStatus>,
@@ -98,8 +100,87 @@ unsafe fn button(hwnd: HWND, id: isize, r: RECT, text: &str, font: HFONT) -> HWN
     ui::apply_font(b, font);
     b
 }
+unsafe fn layout_controls(s: &State, dpi: u32) {
+    let r = rect(dpi, 48, 166, 340, 24);
+    let _ = SetWindowPos(
+        s.path,
+        None,
+        r.left,
+        r.top,
+        r.right - r.left,
+        r.bottom - r.top,
+        SWP_NOZORDER | SWP_NOACTIVATE,
+    );
+    let r = rect(dpi, 410, 156, 102, 42);
+    let _ = SetWindowPos(
+        s.browse,
+        None,
+        r.left,
+        r.top,
+        r.right - r.left,
+        r.bottom - r.top,
+        SWP_NOZORDER | SWP_NOACTIVATE,
+    );
+    let _ = SetWindowPos(
+        s.desktop,
+        None,
+        scale(40, dpi),
+        scale(278, dpi),
+        scale(220, dpi),
+        scale(28, dpi),
+        SWP_NOZORDER | SWP_NOACTIVATE,
+    );
+    let _ = SetWindowPos(
+        s.menu,
+        None,
+        scale(284, dpi),
+        scale(278, dpi),
+        scale(228, dpi),
+        scale(28, dpi),
+        SWP_NOZORDER | SWP_NOACTIVATE,
+    );
+    let _ = SetWindowPos(
+        s.launch,
+        None,
+        scale(40, dpi),
+        scale(314, dpi),
+        scale(460, dpi),
+        scale(28, dpi),
+        SWP_NOZORDER | SWP_NOACTIVATE,
+    );
+    let r = rect(dpi, 356, 544, 180, 40);
+    let _ = SetWindowPos(
+        s.primary,
+        None,
+        r.left,
+        r.top,
+        r.right - r.left,
+        r.bottom - r.top,
+        SWP_NOZORDER | SWP_NOACTIVATE,
+    );
+    let r = rect(dpi, 244, 544, 96, 40);
+    let _ = SetWindowPos(
+        s.secondary,
+        None,
+        r.left,
+        r.top,
+        r.right - r.left,
+        r.bottom - r.top,
+        SWP_NOZORDER | SWP_NOACTIVATE,
+    );
+    let r = rect(dpi, 508, 16, 28, 28);
+    let _ = SetWindowPos(
+        s.close,
+        None,
+        r.left,
+        r.top,
+        r.right - r.left,
+        r.bottom - r.top,
+        SWP_NOZORDER | SWP_NOACTIVATE,
+    );
+}
 unsafe fn init(hwnd: HWND) -> State {
-    let dpi = screen_dpi();
+    let dpi = window_dpi(hwnd);
     let font = create_font(14, dpi, false);
     let small = create_font(12, dpi, false);
     let title = create_font(24, dpi, true);
@@ -169,14 +250,14 @@ unsafe fn init(hwnd: HWND) -> State {
     }
     let primary = button(hwnd, PRIMARY, rect(dpi, 356, 544, 180, 40), "安装", font);
     let secondary = button(hwnd, SECONDARY, rect(dpi, 244, 544, 96, 40), "取消", font);
-    button(hwnd, CLOSE, rect(dpi, 508, 16, 28, 28), "×", font);
+    let close = button(hwnd, CLOSE, rect(dpi, 508, 16, 28, 28), "×", font);
     let (tx, detection) = mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(driver::detect_with(&driver::RealDriverHost));
     });
     SetTimer(Some(hwnd), 1, 150, None);
     ui::round_corners(hwnd);
-    State {
+    let state = State {
         dpi,
         font,
         small,
@@ -185,11 +266,13 @@ unsafe fn init(hwnd: HWND) -> State {
         field: solid_brush(COLOR_CONTROL),
         controls: vec![path, browse, desktop, menu, launch],
         path,
+        browse,
         desktop,
         menu,
         launch,
         primary,
         secondary,
+        close,
         page: Page::Configure,
         options,
         detection,
@@ -199,7 +282,9 @@ unsafe fn init(hwnd: HWND) -> State {
         percent: 0,
         message: String::new(),
         cancelling: false,
-    }
+    };
+    layout_controls(&state, dpi);
+    state
 }
 unsafe fn text(
     hdc: HDC,
@@ -725,6 +810,47 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     Some(WPARAM(HTCAPTION as usize)),
                     Some(lp),
                 );
+            }
+            LRESULT(0)
+        }
+        WM_DPICHANGED => {
+            if lp.0 != 0 {
+                let suggested = &*(lp.0 as *const RECT);
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    suggested.left,
+                    suggested.top,
+                    suggested.right - suggested.left,
+                    suggested.bottom - suggested.top,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                let new_dpi = (wp.0 & 0xffff) as u32;
+                s.dpi = new_dpi;
+                let new_font = create_font(14, new_dpi, false);
+                let new_small = create_font(12, new_dpi, false);
+                let new_title = create_font(24, new_dpi, true);
+                for child in [
+                    s.path,
+                    s.browse,
+                    s.desktop,
+                    s.menu,
+                    s.launch,
+                    s.primary,
+                    s.secondary,
+                    s.close,
+                ] {
+                    ui::apply_font(child, new_font);
+                }
+                let old_fonts = [s.font, s.small, s.title];
+                s.font = new_font;
+                s.small = new_small;
+                s.title = new_title;
+                for old in old_fonts {
+                    delete_gdi(font_as_gdi(old));
+                }
+                layout_controls(s, new_dpi);
+                let _ = InvalidateRect(Some(hwnd), None, false);
             }
             LRESULT(0)
         }

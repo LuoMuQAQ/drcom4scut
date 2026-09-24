@@ -15,16 +15,17 @@ use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC,
-    DrawFocusRect, DrawTextW, EndPaint, FillRect, InflateRect, SelectObject, SetBkMode,
+    DrawFocusRect, DrawTextW, EndPaint, FillRect, InflateRect, InvalidateRect, SelectObject, SetBkMode,
     SetTextColor, DRAW_TEXT_FORMAT, DT_CENTER, DT_NOPREFIX, DT_SINGLELINE,
     DT_VCENTER, DT_WORDBREAK, HDC, HFONT, HGDIOBJ, PAINTSTRUCT, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{DRAWITEMSTRUCT, ODS_FOCUS, ODS_SELECTED};
 use windows::Win32::UI::WindowsAndMessaging::{
     DefWindowProcW, DestroyWindow, GetClientRect, GetWindowLongPtrW, GetWindowLongPtrW as GetStyle,
-    PostQuitMessage, SendMessageW, SetWindowLongPtrW, SetWindowLongPtrW as SetStyle, GWLP_USERDATA,
-    GWL_STYLE, HTCAPTION, WM_CLOSE, WM_COMMAND, WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DESTROY,
-    WM_DRAWITEM, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_NCLBUTTONDOWN, WM_PAINT,
+    PostQuitMessage, SendMessageW, SetWindowLongPtrW, SetWindowLongPtrW as SetStyle, SetWindowPos,
+    GWLP_USERDATA, GWL_STYLE, HTCAPTION, SWP_NOACTIVATE, SWP_NOZORDER, WM_CLOSE, WM_COMMAND,
+    WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND,
+    WM_LBUTTONDOWN, WM_NCLBUTTONDOWN, WM_PAINT,
 };
 
 const CLOSE: isize = 3003;
@@ -242,6 +243,42 @@ struct UnUi {
     font: HFONT,
     small: HFONT,
     title: HFONT,
+    btn_ok: HWND,
+    btn_cancel: HWND,
+    btn_close: HWND,
+}
+
+unsafe fn layout_controls(s: &UnUi, dpi: u32) {
+    let r = rect(dpi, 336, 276, 120, 40);
+    let _ = SetWindowPos(
+        s.btn_ok,
+        None,
+        r.left,
+        r.top,
+        r.right - r.left,
+        r.bottom - r.top,
+        SWP_NOZORDER | SWP_NOACTIVATE,
+    );
+    let r = rect(dpi, 228, 276, 96, 40);
+    let _ = SetWindowPos(
+        s.btn_cancel,
+        None,
+        r.left,
+        r.top,
+        r.right - r.left,
+        r.bottom - r.top,
+        SWP_NOZORDER | SWP_NOACTIVATE,
+    );
+    let r = rect(dpi, 428, 16, 28, 28);
+    let _ = SetWindowPos(
+        s.btn_close,
+        None,
+        r.left,
+        r.top,
+        r.right - r.left,
+        r.bottom - r.top,
+        SWP_NOZORDER | SWP_NOACTIVATE,
+    );
 }
 
 impl Drop for UnUi {
@@ -368,26 +405,30 @@ fn begin_uninstall(hwnd: HWND) {
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if msg == windows::Win32::UI::WindowsAndMessaging::WM_CREATE {
-        let dpi = screen_dpi();
+        let dpi = window_dpi(hwnd);
         let font = create_font(14, dpi, false);
         let small = create_font(12, dpi, false);
         let title = create_font(22, dpi, true);
-        let _ok = owner_button(hwnd, ui::ID_OK, rect(dpi, 336, 276, 120, 40), "卸载", font);
-        let _cancel = owner_button(
+        let btn_ok = owner_button(hwnd, ui::ID_OK, rect(dpi, 336, 276, 120, 40), "卸载", font);
+        let btn_cancel = owner_button(
             hwnd,
             ui::ID_CANCEL,
             rect(dpi, 228, 276, 96, 40),
             "取消",
             font,
         );
-        owner_button(hwnd, CLOSE, rect(dpi, 428, 16, 28, 28), "×", font);
+        let btn_close = owner_button(hwnd, CLOSE, rect(dpi, 428, 16, 28, 28), "×", font);
         ui::round_corners(hwnd);
         let state = Box::new(UnUi {
             dpi,
             font,
             small,
             title,
+            btn_ok,
+            btn_cancel,
+            btn_close,
         });
+        layout_controls(&state, dpi);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(state) as isize);
         return LRESULT(0);
     }
@@ -467,6 +508,38 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     Some(WPARAM(HTCAPTION as usize)),
                     Some(lparam),
                 );
+            }
+            LRESULT(0)
+        }
+        WM_DPICHANGED => {
+            if lparam.0 != 0 {
+                let suggested = &*(lparam.0 as *const RECT);
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    suggested.left,
+                    suggested.top,
+                    suggested.right - suggested.left,
+                    suggested.bottom - suggested.top,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                let new_dpi = (wparam.0 & 0xffff) as u32;
+                s.dpi = new_dpi;
+                let new_font = create_font(14, new_dpi, false);
+                let new_small = create_font(12, new_dpi, false);
+                let new_title = create_font(22, new_dpi, true);
+                for child in [s.btn_ok, s.btn_cancel, s.btn_close] {
+                    ui::apply_font(child, new_font);
+                }
+                let old_fonts = [s.font, s.small, s.title];
+                s.font = new_font;
+                s.small = new_small;
+                s.title = new_title;
+                for old in old_fonts {
+                    delete_gdi(font_as_gdi(old));
+                }
+                layout_controls(s, new_dpi);
+                let _ = InvalidateRect(Some(hwnd), None, false);
             }
             LRESULT(0)
         }
