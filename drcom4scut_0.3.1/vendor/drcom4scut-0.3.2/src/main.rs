@@ -124,7 +124,7 @@ fn main() {
                     })
                     .expect("Can't create EAP Process thread!")
                     .join()
-                    .expect("Unexpected error at EAP Process thread!");
+                    .unwrap_or_else(|_| error!("EAP Process thread panicked! Will restart."));
 
                 error!(
                     "Fatal error at EAP Process thread! Will try restart in {} second(s).",
@@ -203,7 +203,7 @@ fn main() {
                         })
                         .expect("Can't create UDP Process thread!")
                         .join()
-                        .expect("Unexpected Error!");
+                        .unwrap_or_else(|_| error!("UDP Process thread panicked! Will restart."));
                     error!(
                         "Fatal error at UDP Process thread! Will try restart in {} second(s).",
                         settings.reconnect
@@ -212,10 +212,10 @@ fn main() {
                 }
             })
             .expect("Can't create UDP Process generator thread!");
-    udp_handle
-        .join()
-        .expect("Fatal error! UDP Process generator thread quit!");
-    _eap_handle
-        .join()
-        .expect("Fatal error! EAP Process generator thread quit!");
+    if udp_handle.join().is_err() {
+        error!("Fatal error! UDP Process generator thread panicked!");
+    }
+    if _eap_handle.join().is_err() {
+        error!("Fatal error! EAP Process generator thread panicked!");
+    }
 }
