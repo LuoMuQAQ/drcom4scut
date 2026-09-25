@@ -21,6 +21,8 @@ $files = [ordered]@{
     'licenses/NOTICE.txt' = [IO.File]::ReadAllBytes((Join-Path $root 'resources/licenses/NOTICE.txt'))
     'licenses/GPL-3.0.txt' = [IO.File]::ReadAllBytes((Join-Path $root 'resources/licenses/GPL-3.0.txt'))
     'licenses/lucide-LICENSE' = [IO.File]::ReadAllBytes((Join-Path $root 'resources/lucide-LICENSE'))
+    'licenses/font-NOTICE.txt' = [IO.File]::ReadAllBytes((Join-Path $root 'resources/fonts/NOTICE.txt'))
+    'licenses/font-OFL.txt' = [IO.File]::ReadAllBytes((Join-Path $root 'resources/fonts/OFL.txt'))
     'licenses/core-LICENSE' = [IO.File]::ReadAllBytes((Join-Path $root '../drcom4scut_0.3.1/vendor/drcom4scut-0.3.2/LICENSE'))
 }
 function Sha256([byte[]]$bytes) {

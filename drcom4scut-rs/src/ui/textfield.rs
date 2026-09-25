@@ -110,7 +110,9 @@ unsafe extern "system" fn field_proc(
             let x = origin.x - outer.left;
             let y = origin.y - outer.top;
             let _ = ExcludeClipRect(dc, x, y, x + client.right, y + client.bottom);
-            let brush = winutil::solid_brush(winutil::COLOR_CONTROL);
+            // 从父窗口 App 取缓存主题，避免每次重绘读注册表。
+            let palette = winutil::Palette::for_dark(super::window::parent_theme_dark(hwnd));
+            let brush = winutil::solid_brush(palette.control);
             let _ = FillRect(
                 dc,
                 &RECT {
@@ -247,10 +249,15 @@ mod tests {
                 );
                 let _ = GdiFlush();
                 let pixels = std::slice::from_raw_parts(bmp.bits, 300 * 100 * 4);
+                // A thin underline can be entirely antialiased (Noto at 125%
+                // has no channel below 100). Measure visible ink, not a
+                // particular font's fully dark pixel coverage.
+                let ink_pixels = pixels
+                    .chunks_exact(4)
+                    .filter(|p| p[..3].iter().map(|c| 255u16 - *c as u16).sum::<u16>() >= 96)
+                    .count();
                 assert!(
-                    pixels
-                        .chunks_exact(4)
-                        .any(|p| p[0] < 100 && p[1] < 100 && p[2] < 100),
+                    ink_pixels >= 3,
                     "underscore must survive native EDIT painting at {dpi} DPI"
                 );
                 SetWindowTextW(edit, w!("0")).unwrap();

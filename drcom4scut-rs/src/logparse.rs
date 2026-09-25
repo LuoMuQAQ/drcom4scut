@@ -3,7 +3,7 @@
 //! 行为对齐 .NET 版 `Services.cs:347-408` 的 `CoreStatusReader`：
 //! - 健康信号：含「Authorization success」「Heartbeat done」「Send Heartbeat」；
 //! - 「but ignored」行保持中性（.NET 版直接 continue 跳过）；
-//! - 「Fatal error」「Send error」视为错误。
+//! - 核心收发失败、致命错误与等待 EAP 成功超时视为错误。
 //! 在此基础上补充 `Waiting` 信号，用于识别「本时段禁止上网 / 等待定时重连」类日志行。
 //! .NET 版从未把任何日志行映射为 Waiting（该状态只由 GUI 的网络不可用 / 退避计时产生），
 //! 此处按核心（vendor/drcom4scut-0.3.2）真实日志补充，属有意增强，详见 [`WAITING_KEYWORDS`]。
@@ -19,7 +19,7 @@ pub enum Signal {
     Healthy,
     /// 中性信号：明确无害但不说明健康（如 "but ignored"），不改变当前状态。
     Neutral,
-    /// 错误信号：核心报错（"Fatal error" / "Send error"），映射到 [`LinkState::Error`]。
+    /// 错误信号：核心报错，映射到 [`LinkState::Error`]。
     Error,
     /// 等待信号：被服务器禁止上网或等待定时重连，映射到 [`LinkState::Waiting`]。
     Waiting,
@@ -30,8 +30,14 @@ pub enum Signal {
 /// 健康关键词，与 .NET 版 `Services.cs:376-379` 的 `IsHealthyLine` 完全一致。
 const HEALTHY_KEYWORDS: [&str; 3] = ["Authorization success", "Heartbeat done", "Send Heartbeat"];
 
-/// 错误关键词，与 .NET 版 `Services.cs:359-360` 一致。
-const ERROR_KEYWORDS: [&str; 2] = ["Fatal error", "Send error"];
+/// 在 .NET 的发送/致命错误基础上补齐实际日志中的接收和认证等待失败。
+/// 不匹配普通接收空闲超时或启动时打印的 heartbeat timeout 配置。
+const ERROR_KEYWORDS: [&str; 4] = [
+    "Fatal error",
+    "Send error",
+    "Receive error",
+    "Timed out waiting SUCCESS from EAP",
+];
 
 /// 中性关键词："but ignored" 行一律跳过，与 .NET 版 `Services.cs:358` 的 continue 一致。
 const NEUTRAL_KEYWORD: &str = "but ignored";
@@ -61,7 +67,7 @@ pub fn is_healthy_line(line: &str) -> bool {
 /// 匹配均为大小写敏感的子串匹配，与 .NET 版 `StringComparison.Ordinal` 一致；
 /// 优先级复刻 .NET 版逐行判定的先后顺序：
 /// 1. 含 "but ignored" → 中性（.NET 版最先 continue，即使行内含其他关键词）；
-/// 2. 含 "Fatal error" / "Send error" → 错误；
+/// 2. 含收发失败、致命错误或 EAP 成功等待超时 → 错误；
 /// 3. 含健康关键词 → 健康；
 /// 4. 含等待关键词 → 等待；
 /// 5. 其余 → 其他。
@@ -200,6 +206,16 @@ mod tests {
                 "Send error: Os { code: 10064, kind: HostUnreachable, message: \"A socket operation was attempted to an unreachable host.\" }",
                 Signal::Error,
             ),
+            ("Receive error: os error 10060", Signal::Error),
+            ("Receive error: os error 10054", Signal::Error),
+            (
+                "Timed out waiting SUCCESS from EAP, restarting UDP process.",
+                Signal::Error,
+            ),
+            // 空闲超时与启动配置不是连接故障。
+            ("Receive timeout (idle), keep waiting.", Signal::Other),
+            ("Heartbeat timeout of EAP: 60s", Signal::Other),
+            ("Heartbeat timeout of UDP: 12s", Signal::Other),
             // —— 等待信号：本时段禁止上网 / 等待定时重连 ——
             ("本时段禁止上网", Signal::Waiting),
             (

@@ -1,4 +1,4 @@
-Windows GUI release 0.3.4
+Windows GUI release 0.3.6
 
 Build the GUI/installer with drcom4scut-rs/publish-setup.ps1.
 Rust: nightly-2026-09-06-x86_64-pc-windows-gnu; explicit target x86_64-pc-windows-gnu.
@@ -8,13 +8,13 @@ The script accepts -BuildDirectory and -PayloadDirectory to override defaults.
 Embedded core corresponding source:
 drcom4scut_0.3.1/vendor/drcom4scut-0.3.2
 Core build script: drcom4scut_0.3.1/build-core.ps1
-Create drcom4scut_0.3.1/src/Resources before running the core script.
+The core script defaults to drcom4scut-rs/resources/drcom4scut.exe; use -Destination only for an explicit alternative.
 The script downloads and verifies Npcap SDK 1.15, compiles core 0.3.2, and validates --version and SHA256.
-Copy the verified src/Resources/drcom4scut.exe into drcom4scut-rs/resources/drcom4scut.exe.
-Core SHA256: 1838ad6c20c99d84d8a6d2ee603dda133a2314209b65ed9cdd31d0247c8f1052
-Core version remains 0.3.2 to preserve accurate upstream provenance. GUI/release version is 0.3.4.
+The verified binary is copied only after version/hash checks; historical .NET resources are preserved.
+Core SHA256: e571bf8b366db40c43a0b4e17e8faaafe2088c242ede4856995965b2868d5083
+Core version remains 0.3.2 to preserve accurate upstream provenance. GUI/release version is 0.3.6.
 See core PATCHES.md for the credential-handling patches and the GUI lifetime binding. The core exits after an EAPOL-Logoff when the GUI process handle or shutdown event is signaled.
 
 After publish-setup.ps1, run drcom4scut-rs/publish-portable.ps1 to create the portable ZIP.
-Release uploads: drcom4scut-Setup-0.3.4.exe and drcom4scut-Portable-0.3.4-win-x64.zip only.
-Corresponding source tag: windows-v0.3.4 in https://github.com/LuoMuQAQ/drcom4scut
+Release uploads: Setup, Portable ZIP, revision source ZIP, and SHA256SUMS.
+Corresponding source tag: windows-v0.3.6-heroui in https://github.com/LuoMuQAQ/drcom4scut

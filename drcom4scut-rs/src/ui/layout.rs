@@ -1,29 +1,26 @@
 //! Shared logical geometry (96 DPI) for painting, child windows and hit testing.
 
-pub const WIDTH: i32 = 420;
-pub const TITLE_HEIGHT: i32 = 40;
-pub const OUTER_PADDING: i32 = 20;
-pub const SECTION_GAP: i32 = 12;
-pub const CARD_PADDING: i32 = 16;
-pub const STATUS_HEIGHT: i32 = 76 + CARD_PADDING * 2;
-pub const STATUS_TOP: i32 = TITLE_HEIGHT + OUTER_PADDING;
-pub const STATUS_BOTTOM: i32 = STATUS_TOP + STATUS_HEIGHT;
-pub const ACCOUNT_TOP: i32 = STATUS_BOTTOM + SECTION_GAP;
-pub const ACCOUNT_BOTTOM: i32 = ACCOUNT_TOP + 310;
-pub const FIELD_HEIGHT: i32 = 36;
-pub const USER_TOP: i32 = ACCOUNT_TOP + 62;
-pub const PASS_TOP: i32 = USER_TOP + 64;
-pub const COMBO_TOP: i32 = PASS_TOP + 64;
-pub const TOGGLE_TOP: i32 = COMBO_TOP + FIELD_HEIGHT + 14;
-pub const TOGGLE_SECOND_TOP: i32 = TOGGLE_TOP + 34;
-pub const ACTION_TOP: i32 = ACCOUNT_BOTTOM + SECTION_GAP;
+pub const WIDTH: i32 = 480;
+pub const TITLE_HEIGHT: i32 = 48;
+pub const OUTER_PADDING: i32 = 30;
+pub const TABS_TOP: i32 = 228;
+pub const FIELD_HEIGHT: i32 = 44;
+pub const USER_TOP: i32 = 316;
+pub const PASS_TOP: i32 = 404;
+pub const COMBO_TOP: i32 = 492;
+pub const REMEMBER_TOP: i32 = 548;
+pub const SETTINGS_TOP: i32 = 292;
+pub const SETTINGS_ROW: i32 = 70;
+pub const ACTION_TOP: i32 = 600;
 pub const ACTION_BOTTOM: i32 = ACTION_TOP + FIELD_HEIGHT;
-pub const HEIGHT: i32 = ACTION_BOTTOM + OUTER_PADDING;
+pub const FOOTER_TOP: i32 = 672;
+pub const HEIGHT: i32 = 720;
+pub const CAPTION_SIZE: i32 = super::winutil::UI_CAPTION_SIZE;
 
 pub const CARD_LEFT: i32 = OUTER_PADDING;
 pub const CARD_RIGHT: i32 = WIDTH - OUTER_PADDING;
-pub const FIELD_LEFT: i32 = CARD_LEFT + CARD_PADDING;
-pub const FIELD_RIGHT: i32 = CARD_RIGHT - CARD_PADDING;
+pub const FIELD_LEFT: i32 = CARD_LEFT;
+pub const FIELD_RIGHT: i32 = CARD_RIGHT;
 
 use super::winutil::scale;
 use windows::Win32::Foundation::RECT;
@@ -64,19 +61,19 @@ pub struct Controls {
 pub fn controls(dpi: u32) -> Controls {
     let s = |v| scale(v, dpi);
     let field = |top, inset| RECT {
-        left: s(FIELD_LEFT) + s(10),
-        top: s(top) + 1,
+        left: s(FIELD_LEFT + 38),
+        top: s(top + 4),
         right: s(FIELD_RIGHT) - s(inset),
-        bottom: s(top + FIELD_HEIGHT) - 1,
+        bottom: s(top + FIELD_HEIGHT - 4),
     };
     let icon = s(20);
     Controls {
         user: field(USER_TOP, 10),
         pass: field(PASS_TOP, 40),
         eye: RECT {
-            left: s(348),
+            left: s(FIELD_RIGHT - 40),
             top: s(PASS_TOP + 4),
-            right: s(348) + s(30),
+            right: s(FIELD_RIGHT - 10),
             bottom: s(PASS_TOP + 4) + s(FIELD_HEIGHT - 8),
         },
         eye_hit: RECT {

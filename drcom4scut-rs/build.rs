@@ -124,6 +124,9 @@ fn embed_with_windres(binary: &str, manifest_path: &std::path::Path) {
 
 // License for the embedded eye / eye-off SVG artwork.
 102 RCDATA "resources/lucide-LICENSE"
+
+// Full OFL/copyright notice travels with each standalone executable.
+103 RCDATA "resources/fonts/NOTICE.txt"
 "#,
         manifest_path.display().to_string().replace("\\", "\\\\")
     );

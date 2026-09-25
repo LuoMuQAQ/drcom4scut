@@ -134,6 +134,7 @@ dependencies = [
 name = "drcom4scut-gui"
 version = "0.3.6"
 dependencies = [
+ "flate2",
  "resvg",
  "serde",
  "serde_json",

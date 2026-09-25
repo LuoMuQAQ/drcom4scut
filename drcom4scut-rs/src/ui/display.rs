@@ -61,19 +61,30 @@ unsafe fn apply(hwnd: HWND, display_dpi: u32, anchor: RECT, work: RECT) {
         app.dpi = dpi;
         let old_fonts = [app.font, app.font_title, app.font_label, app.font_btn];
         app.font = create_font(14, dpi, false);
-        app.font_title = create_font(20, dpi, true);
-        app.font_label = create_font(12, dpi, false);
+        app.font_title = create_font(28, dpi, true);
+        app.font_label = create_font(layout::CAPTION_SIZE, dpi, false);
         app.font_btn = create_font(14, dpi, true);
         app.logo_title = winutil::rasterize_app_svg(app.s(52).max(1) as u32);
         app.logo_status = winutil::rasterize_app_svg(app.s(152).max(1) as u32);
-        app.eye_on = winutil::rasterize_eye_on(app.s(40).max(1) as u32);
-        app.eye_off = winutil::rasterize_eye_off(app.s(40).max(1) as u32);
-        for child in [app.hwnd_user, app.hwnd_pass, app.hwnd_eye, app.hwnd_eye_tip] {
+        let eye_color = winutil::Palette::for_dark(app.is_dark).text_secondary;
+        app.eye_on = winutil::rasterize_eye_on(app.s(40).max(1) as u32, eye_color);
+        app.eye_off = winutil::rasterize_eye_off(app.s(40).max(1) as u32, eye_color);
+        for child in [
+            app.hwnd_user,
+            app.hwnd_pass,
+            app.hwnd_eye,
+            app.hwnd_eye_tip,
+            app.hwnd_user_label,
+            app.hwnd_pass_label,
+        ] {
             if !child.0.is_null() {
                 set_font(child, app.font);
             }
         }
-        // EDIT must stop referring to the old font before its GDI handle dies.
+        for (_, child) in &app.buttons {
+            set_font(*child, app.font);
+        }
+        // Every native control must release the old font before its GDI handle dies.
         for font in old_fonts {
             delete_gdi(font_as_gdi(font));
         }
@@ -106,6 +117,7 @@ unsafe fn apply(hwnd: HWND, display_dpi: u32, anchor: RECT, work: RECT) {
         bounds.bottom - bounds.top,
         SWP_NOACTIVATE | SWP_NOZORDER,
     );
+    v3::layout_buttons(hwnd);
     round_corners(hwnd);
     if let Some(app) = app_mut(hwnd) {
         app.layout_in_progress = false;
@@ -160,7 +172,10 @@ mod tests {
             );
             create_controls(hwnd);
             app.logo_title = winutil::rasterize_app_svg(app.s(52) as u32);
-            app.eye_on = winutil::rasterize_eye_on(app.s(40) as u32);
+            app.eye_on = winutil::rasterize_eye_on(
+                app.s(40) as u32,
+                winutil::Palette::for_dark(app.is_dark).text_secondary,
+            );
             SetWindowTextW(app.hwnd_user, w!("test-account")).unwrap();
             SetWindowTextW(app.hwnd_pass, w!("_Ag09_中文")).unwrap();
             Self { hwnd, app }
@@ -213,6 +228,12 @@ mod tests {
             );
         }
         let mut font = LOGFONTW::default();
+        for (_, child) in &f.app.buttons {
+            assert_eq!(
+                SendMessageW(*child, WM_GETFONT, None, None).0,
+                f.app.font.0 as isize
+            );
+        }
         assert_ne!(
             GetObjectW(
                 font_as_gdi(f.app.font),
@@ -221,16 +242,19 @@ mod tests {
             ),
             0
         );
-        assert_eq!(font.lfHeight, -f.app.s(14));
+        assert_eq!(font.lfHeight, -(((14 * f.app.dpi + 48) / 96) as i32));
         assert_eq!(
             hit_test(&f.app, f.app.s(368), f.app.s(layout::COMBO_TOP + 18)),
             Hit::Combo
         );
         assert_eq!(
-            hit_test(&f.app, f.app.s(175), f.app.s(layout::TOGGLE_TOP + 10)),
-            Hit::Auto
+            hit_test(&f.app, f.app.s(100), f.app.s(layout::REMEMBER_TOP + 10)),
+            Hit::Remember
         );
-        assert_eq!(hit_test(&f.app, f.app.s(380), f.app.s(20)), Hit::Close);
+        assert_eq!(
+            hit_test(&f.app, f.app.s(CLIENT_W - 20), f.app.s(20)),
+            Hit::Close
+        );
         assert_eq!(f.app.eye_rect, controls.eye_hit);
         assert!(
             !IsWindowVisible(f.hwnd).as_bool(),

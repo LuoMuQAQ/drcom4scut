@@ -1,14 +1,19 @@
+param(
+    # Native GUI is the maintained target; legacy .NET requires an explicit path.
+    [string] $Destination = (Join-Path $PSScriptRoot '..\drcom4scut-rs\resources\drcom4scut.exe')
+)
+
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $root = $PSScriptRoot
 $source = Join-Path $root 'vendor\drcom4scut-0.3.2'
-$destination = Join-Path $root 'src\Resources\drcom4scut.exe'
+$destination = [System.IO.Path]::GetFullPath($Destination)
 $staging = Join-Path $env:TEMP 'drcom4scut-v3-core-build'
 $sdkArchive = Join-Path $staging 'npcap-sdk-1.15.zip'
 $sdkUrl = 'https://npcap.com/dist/npcap-sdk-1.15.zip'
 $sdkSha256 = '52c7b9fb4abee3ad9fe739bb545c3efe77b731c8e127122bdf328eafdae3ed4f'
-$expectedCoreSha256 = '6bdcedd20e30ae9721a7db95c8d8dbf6dd01f57e9ed50fa4b8583b2c7d16938f'
+$expectedCoreSha256 = 'e571bf8b366db40c43a0b4e17e8faaafe2088c242ede4856995965b2868d5083'
 $sourceDateEpoch = '1788546015'
 $rustToolchain = 'nightly-2026-09-06-x86_64-pc-windows-gnu'
 $rustCommit = 'f248f4038796913873f11ca65b1b901e311c8dae'
@@ -33,13 +38,14 @@ if (-not (Test-Path -LiteralPath (Join-Path $source 'Cargo.lock') -PathType Leaf
     throw "Vendored core source not found: $source"
 }
 
-Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path $staging -Force | Out-Null
 Get-ChildItem -LiteralPath $source -Force |
     Where-Object { $_.Name -ne 'target' -and $_.Name -ne 'Packet.lib' } |
     Copy-Item -Destination $staging -Recurse -Force
 
-Invoke-WebRequest -Uri $sdkUrl -OutFile $sdkArchive
+if (-not (Test-Path -LiteralPath $sdkArchive -PathType Leaf)) {
+    Invoke-WebRequest -Uri $sdkUrl -OutFile $sdkArchive
+}
 $actualSdkHash = Get-Sha256 $sdkArchive
 if ($actualSdkHash -ne $sdkSha256) {
     throw "Npcap SDK hash mismatch. Expected $sdkSha256, received $actualSdkHash"
@@ -77,15 +83,14 @@ finally {
 
 $built = Join-Path $staging 'target\x86_64-pc-windows-gnu\release\drcom4scut.exe'
 if (-not (Test-Path -LiteralPath $built -PathType Leaf)) { throw "Core build output missing: $built" }
-Copy-Item -LiteralPath $built -Destination $destination -Force
-
-$version = (& $destination --version 2>&1 | Out-String).Trim()
+$version = (& $built --version 2>&1 | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $version -ne 'drcom4scut 0.3.2') {
     throw "Core version validation failed: $version"
 }
 
-$hash = Get-Sha256 $destination
+$hash = Get-Sha256 $built
 if ($hash -ne $expectedCoreSha256) {
     throw "Core reproducibility check failed. Expected $expectedCoreSha256, received $hash"
 }
+Copy-Item -LiteralPath $built -Destination $destination -Force
 Write-Host "Built and validated $version ($hash)" -ForegroundColor Green

@@ -2,28 +2,20 @@
 
 use std::path::PathBuf;
 
-use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{
-    BeginPaint, EndPaint, SetBkMode, SetTextColor, TextOutW, PAINTSTRUCT, TRANSPARENT,
-};
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::Graphics::Gdi::{SetBkMode, SetTextColor, TRANSPARENT, TextOutW};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW,
-    GetWindowLongPtrW, GetWindowTextW, LoadCursorW, LoadIconW, MessageBoxW, PostQuitMessage,
-    RegisterClassW, SendMessageW, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
-    TranslateMessage, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HMENU, HWND_TOP, IDC_ARROW,
-    MB_ICONWARNING, MB_OK, MB_OKCANCEL, MSG, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE,
-    WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY,
-    WM_ERASEBKGND, WM_LBUTTONDOWN, WM_PAINT, WM_SETFONT, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN,
-    WS_EX_APPWINDOW, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DispatchMessageW, GetMessageW, GetWindowTextW, HMENU,
+    IDC_ARROW, LoadCursorW, LoadIconW, MB_ICONWARNING, MB_OK, MB_OKCANCEL, MSG, MessageBoxW,
+    RegisterClassW, SendMessageW, SetWindowTextW, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_SETFONT, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_EX_APPWINDOW, WS_POPUP, WS_SYSMENU,
+    WS_TABSTOP, WS_VISIBLE,
 };
+use windows::core::{PCWSTR, w};
 
 use crate::install::{APP_DISPLAY_NAME, APP_VERSION};
-use crate::ui::winutil::{
-    self, create_font, delete_gdi, font_as_gdi, scale, solid_brush, wide, COLOR_ACCENT, COLOR_PAGE,
-    COLOR_TEXT_PRIMARY, COLOR_TEXT_SECONDARY,
-};
+use crate::ui::winutil::{self, COLOR_TEXT_PRIMARY, COLOR_TEXT_SECONDARY, scale, wide};
 
 pub const ID_PATH: isize = 2001;
 pub const ID_BROWSE: isize = 2002;
@@ -63,12 +55,12 @@ pub fn alert(hwnd: HWND, title: &str, text: &str) {
 
 pub fn pick_directory(owner: HWND, current: &str) -> Option<PathBuf> {
     use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
-        COINIT_APARTMENTTHREADED,
+        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+        CoUninitialize,
     };
     use windows::Win32::UI::Shell::{
-        FileOpenDialog, IFileOpenDialog, IShellItem, SHCreateItemFromParsingName,
-        FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
+        FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, IShellItem,
+        SHCreateItemFromParsingName, SIGDN_FILESYSPATH,
     };
     unsafe {
         struct ComGuard;
@@ -214,6 +206,81 @@ pub fn create_child_check(
     }
 }
 
+/// Keep the native automatic-checkbox state, keyboard behavior and accessibility,
+/// while painting its presentation as a HeroUI v3 switch.
+pub fn theme_checkbox(hwnd: HWND, dark: bool, dpi: u32) {
+    unsafe {
+        let _ = windows::Win32::UI::Shell::SetWindowSubclass(
+            hwnd,
+            Some(switch_proc),
+            31,
+            ((dpi as usize) << 1) | dark as usize,
+        );
+        let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), None, false);
+    }
+}
+
+unsafe extern "system" fn switch_proc(
+    hwnd: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    _id: usize,
+    data: usize,
+) -> windows::Win32::Foundation::LRESULT {
+    use crate::ui::hero;
+    use windows::Win32::Graphics::Gdi::*;
+    use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass};
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    if msg == WM_ERASEBKGND {
+        return windows::Win32::Foundation::LRESULT(1);
+    }
+    if matches!(msg, WM_PAINT | WM_PRINT | WM_PRINTCLIENT) {
+        let mut ps = PAINTSTRUCT::default();
+        let dc = if msg == WM_PAINT {
+            BeginPaint(hwnd, &mut ps)
+        } else {
+            HDC(wp.0 as *mut _)
+        };
+        let dpi = (data >> 1) as u32;
+        let p = winutil::Palette::for_dark(data & 1 != 0);
+        let mut r = windows::Win32::Foundation::RECT::default();
+        let _ = GetClientRect(hwnd, &mut r);
+        winutil::paint_buffered(dc, r, |dc| {
+            hero::line(dc, r, p.page);
+            let font = HFONT(SendMessageW(hwnd, WM_GETFONT, None, None).0 as *mut _);
+            let mut label = r;
+            label.right -= scale(60, dpi);
+            hero::text(
+                dc,
+                font,
+                p.text_primary,
+                label,
+                &edit_text(hwnd),
+                DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+            );
+            let x = (r.right * 96 / dpi as i32) - 46;
+            let y = ((r.bottom * 96 / dpi as i32) - 20) / 2;
+            hero::switch(dc, x, y, dpi, p, if is_checked(hwnd) { 1.0 } else { 0.0 });
+        });
+        if msg == WM_PAINT {
+            let _ = EndPaint(hwnd, &ps);
+        }
+        return windows::Win32::Foundation::LRESULT(0);
+    }
+    if msg == WM_NCDESTROY {
+        let _ = RemoveWindowSubclass(hwnd, Some(switch_proc), 31);
+    }
+    let result = DefSubclassProc(hwnd, msg, wp, lp);
+    if matches!(
+        msg,
+        WM_SETFOCUS | WM_KILLFOCUS | WM_LBUTTONUP | WM_KEYUP | WM_ENABLE | 0x00f1 | 0x00f5
+    ) {
+        let _ = InvalidateRect(Some(hwnd), None, false);
+    }
+    result
+}
+
 pub fn is_checked(hwnd: HWND) -> bool {
     unsafe { SendMessageW(hwnd, 0x00F0, Some(WPARAM(0)), Some(LPARAM(0))).0 != 0 }
     // BM_GETCHECK
@@ -331,34 +398,6 @@ pub fn create_popup(
         )
         .ok()
     }
-}
-
-pub fn fill_page(hdc: windows::Win32::Graphics::Gdi::HDC, hwnd: HWND) {
-    unsafe {
-        let mut rc = RECT::default();
-        let _ = GetClientRect(hwnd, &mut rc);
-        let brush = solid_brush(COLOR_PAGE);
-        let _ = windows::Win32::Graphics::Gdi::FillRect(hdc, &rc, brush);
-        delete_gdi(windows::Win32::Graphics::Gdi::HGDIOBJ(brush.0));
-        let _ = COLOR_ACCENT;
-        let _ = WS_OVERLAPPED;
-    }
-}
-
-pub fn ctl_color_static(hdc: windows::Win32::Graphics::Gdi::HDC) -> LRESULT {
-    unsafe {
-        let _ = SetBkMode(hdc, TRANSPARENT);
-        let _ = SetTextColor(hdc, COLOR_TEXT_PRIMARY);
-    }
-    LRESULT(solid_brush(COLOR_PAGE).0 as isize)
-}
-
-pub fn ctl_color_edit(hdc: windows::Win32::Graphics::Gdi::HDC) -> LRESULT {
-    unsafe {
-        let _ = SetBkMode(hdc, TRANSPARENT);
-        let _ = SetTextColor(hdc, COLOR_TEXT_PRIMARY);
-    }
-    LRESULT(solid_brush(winutil::COLOR_CONTROL).0 as isize)
 }
 
 pub use winutil::screen_dpi;

@@ -43,7 +43,7 @@
 ### 主要改动：
 
 1. **main.rs / Cargo.toml** - panic 策略调整为 `unwind` 并用 `catch_unwind` 隔离，避免工作线程 panic 导致主进程硬崩溃。
-2. **udp.rs / main.rs / eap.rs** - UDP 线程重建时自动重注入缓存的 EAP SUCCESS 状态，彻底解决睡眠唤醒后 UDP 永久等待 EAP SUCCESS 的断网根因。
+2. **udp.rs / main.rs / eap.rs** - UDP 线程重建时自动重注入缓存的 EAP SUCCESS 状态，缓解 UDP 等待 EAP SUCCESS 的恢复问题；旧接收线程竞争仍存在，见下方后续修复。
 3. **udp.rs / socket.rs** - 修复重发线程在空队列或异常时的 busy-spin 空转；修复读超时被误报为致命错误的问题。
 4. **packet.rs / udp.rs / eap.rs** - 强化报文解析防越界防畸形，增加长度校验与边界防护。
 5. **udp.rs** - RwLock 获取失败时引入有限重试策略，避免静默丢包或状态滞后。
@@ -52,3 +52,11 @@
 8. **main.rs** - 日志目录缺失时尝试自动创建而不崩溃退出；增加死线程探针检测与自动重建。
 9. **config.rs** - 对危险配置参数执行边界 clamp 校正，避免极端参数异常。
 
+
+## 6. HeroUI 发行修订的 UDP 重连修复 (0.3.6)
+
+2026-09-25。native GUI 内嵌核心 SHA-256：`e571bf8b366db40c43a0b4e17e8faaafe2088c242ede4856995965b2868d5083`；历史 .NET 核心资源保持原样。
+
+每代 UDP 独立 EAP inbox，缓存重放与发布同步；STOP/SLEEP/QUIT 和 EAP 失败/退出使缓存失效。UDP owner 直接接收通知，移除旧 EAPtoUDP 线程；清理旧 checksum、单调超时与取消、Drop 唤醒及空闲线程退出。13 项离线测试通过，真实联网恢复待验证，Windows10022 底层原因未确定。
+
+维护源码及详细补丁见 `vendor/drcom4scut-0.3.2/PATCHES.md`。`build-core.ps1` 默认生成 native 资源并校验上述哈希。

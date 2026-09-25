@@ -2,6 +2,7 @@
 
 mod anim;
 pub mod gdiplus;
+pub mod hero;
 mod layout;
 mod textfield;
 pub mod tray;

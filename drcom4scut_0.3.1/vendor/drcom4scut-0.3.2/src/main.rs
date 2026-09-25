@@ -1,6 +1,7 @@
 #![feature(ip)]
 mod device;
 mod eap;
+mod eap_relay;
 mod logger;
 mod settings;
 mod socket;
@@ -61,10 +62,7 @@ fn main() {
     let ip = device.ip_net.ip();
 
     let (eap_tx, eap_rx) = crossbeam_channel::unbounded::<ChannelData>();
-    let (udp_tx, udp_rx) = crossbeam_channel::unbounded::<ChannelData>();
-    // Cache the latest SUCCESS so it can be re-injected into a rebuilt UDP
-    // process (EAP never resends SUCCESS while it stays authenticated).
-    let last_success = Arc::new(std::sync::Mutex::new(None::<ChannelData>));
+    let relay = Arc::new(eap_relay::EapRelay::default());
 
     let _eap_handle = thread::Builder::new()
         .name("EAP-Process-Generator".to_owned())
@@ -97,7 +95,7 @@ fn main() {
                     .name("EAP-Process".to_owned())
                     .spawn(move || {
                         info!("Create EAP Process.");
-                        let mut eap_process = eap::Process::new(settings, device, tx);
+                        let mut eap_process = eap::Process::new(settings, device, tx.clone());
                         info!("Start EAP Process.");
                         loop {
                             match eap_process.start() {
@@ -110,6 +108,12 @@ fn main() {
                                     break;
                                 }
                                 _ => {
+                                    // Some server notifications stop EAP without
+                                    // publishing an explicit event to UDP.
+                                    let _ = tx.send(ChannelData {
+                                        state: State::Stop,
+                                        data: Vec::new(),
+                                    });
                                     error!(
                                         "Failed at 802.1X Authorization! Will try reconnect in {} second(s).",
                                         settings.reconnect
@@ -124,6 +128,9 @@ fn main() {
                     .join()
                     .unwrap_or_else(|_| error!("EAP Process thread panicked! Will restart."));
 
+                // A panicked EAP process may not have sent QUIT. Invalidate
+                // its cached session before retrying authentication.
+                let _ = eap_tx.send(ChannelData { state: State::Stop, data: Vec::new() });
                 error!(
                     "Fatal error at EAP Process thread! Will try restart in {} second(s).",
                     settings.reconnect
@@ -135,23 +142,14 @@ fn main() {
         .expect("Can't create EAP Process generator thread!");
 
     let udp_handle = {
-        let last_success = last_success.clone();
-        let udp_tx = udp_tx.clone();
+        let relay = relay.clone();
         thread::Builder::new()
             .name("UDP-Process-Generator".to_owned())
             .spawn(move || {
                 loop {
-                    // Re-inject the cached SUCCESS before (re)building the UDP
-                    // process so it does not wait forever for a SUCCESS that
-                    // EAP will never resend while authenticated.
-                    if let Some(s) = last_success
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .clone()
-                    {
-                        let _ = udp_tx.send(s);
-                    }
-                    let rx = udp_rx.clone();
+                    // Subscribe atomically with replay into this generation's
+                    // own inbox; a retired process can never consume its events.
+                    let rx = relay.subscribe();
                     thread::Builder::new()
                         .name("UDP-Process".to_owned())
                         .spawn(move || {
@@ -216,15 +214,9 @@ fn main() {
             .expect("Can't create UDP Process generator thread!")
     };
 
-    // Forward EAP messages to the UDP process and cache the latest SUCCESS.
+    // Retain the latest authentication state even while UDP is rebuilding.
     while let Ok(msg) = eap_rx.recv() {
-        if matches!(msg.state, State::Success) {
-            *last_success.lock().unwrap_or_else(|e| e.into_inner()) = Some(msg.clone());
-        }
-        if udp_tx.send(msg).is_err() {
-            error!("UDP channel is closed, quit forwarding.");
-            break;
-        }
+        relay.publish(msg);
     }
 
     if udp_handle.join().is_err() {

@@ -2,12 +2,12 @@ use std::cmp::min;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
-use std::thread::{self, JoinHandle, Thread};
-use std::time::Duration;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use bytes::BytesMut;
 use chrono::Local;
-use crossbeam_channel::{Receiver, Sender, TryRecvError, unbounded};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError, unbounded};
 use log::{debug, error, info};
 use pnet::datalink::MacAddr;
 
@@ -17,7 +17,7 @@ use crate::udp::packet::{
     Alive, HeaderType, HeartbeatType, MiscAlive, MiscHeartbeat1, MiscHeartbeat3, MiscInfo,
     decrypt_info,
 };
-use crate::util::{self, ChannelData, State, random_vec, sleep};
+use crate::util::{ChannelData, State, random_vec, sleep};
 
 mod packet;
 
@@ -66,9 +66,7 @@ pub struct Process<'a> {
     receiver_handle: Option<Arc<JoinHandle<()>>>,
     resender_handle: Option<Arc<JoinHandle<()>>>,
     sender_handle: Option<Arc<JoinHandle<()>>>,
-    receiving_eap_handle: Option<Arc<JoinHandle<()>>>,
     heartbeat_handle: Option<Arc<JoinHandle<()>>>,
-    thread: Arc<Thread>,
 }
 
 impl<'a> Process<'a> {
@@ -99,9 +97,7 @@ impl<'a> Process<'a> {
             dns,
             resender_handle: None,
             sender_handle: None,
-            receiving_eap_handle: None,
             heartbeat_handle: None,
-            thread: Arc::new(thread::current()),
             receiver_handle: None,
         }
     }
@@ -132,6 +128,7 @@ impl<'a> Process<'a> {
                         }
                         if stop.load(Ordering::Relaxed) {
                             thread::park();
+                            continue;
                         }
                         // 检查 Socket 有效性
                         if consecutive_errors > 5 && !socket.is_valid() {
@@ -151,8 +148,7 @@ impl<'a> Process<'a> {
                             Err(e)
                                 if matches!(
                                     e.kind(),
-                                    std::io::ErrorKind::TimedOut
-                                        | std::io::ErrorKind::WouldBlock
+                                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
                                 ) =>
                             {
                                 // Read timeout just means 30s of silence, not an
@@ -203,9 +199,16 @@ impl<'a> Process<'a> {
                         }
                         if stop.load(Ordering::Relaxed) {
                             thread::park();
+                            continue;
                         }
                         while cancel_resend.load(Ordering::Acquire) {
+                            if quit.load(Ordering::Acquire) {
+                                return;
+                            }
                             thread::park();
+                        }
+                        if quit.load(Ordering::Acquire) || stop.load(Ordering::Acquire) {
+                            continue;
                         }
                         let wait_ts = send_ts.load(Ordering::Acquire)
                             - Local::now().timestamp_millis()
@@ -257,8 +260,9 @@ impl<'a> Process<'a> {
                         }
                         if stop.load(Ordering::Relaxed) {
                             thread::park();
+                            continue;
                         }
-                        match rx.recv() {
+                        match rx.recv_timeout(Duration::from_millis(200)) {
                             Ok((v, b)) => {
                                 debug!("Sender received.");
                                 if !v.is_empty() {
@@ -266,7 +270,11 @@ impl<'a> Process<'a> {
                                     resend = b;
                                 }
                             }
-                            Err(_) => {
+                            Err(RecvTimeoutError::Timeout) => continue,
+                            Err(RecvTimeoutError::Disconnected) => {
+                                if quit.load(Ordering::Acquire) {
+                                    return;
+                                }
                                 quit.store(true, Ordering::Release);
                                 error!("Unexpected! Send channel is disconnected!");
                                 continue;
@@ -330,70 +338,51 @@ impl<'a> Process<'a> {
         debug!("Sent.");
     }
 
-    fn start_receive_eap_thread(&mut self) {
-        if let Some(handle) = &self.receiving_eap_handle {
-            handle.thread().unpark();
-            return;
-        }
-        info!("Start to receive message from EAP.");
-        let quit = self.quit.clone();
-        let stop = self.stop.clone();
-        let sleep = self.sleep.clone();
-        let rx = self.rx.clone();
-        let data = self.data.clone();
-        let thread = self.thread.clone();
-        self.receiving_eap_handle = Some(Arc::new(
-            thread::Builder::new()
-                .name("EAPtoUDP".to_owned())
-                .spawn(move || {
-                    loop {
-                        if quit.load(Ordering::Relaxed) {
-                            info!("Stop receiving message from EAP.");
-                            debug!("EAPtoUDP thread quit!");
-                            return;
-                        }
-                        if stop.load(Ordering::Relaxed) {
-                            thread.unpark();
-                            thread::park();
-                        }
-                        match rx.recv() {
-                            Ok(x) => match x.state {
-                                State::Success => {
-                                    info!("Receive SUCCESS from EAP.");
-                                    match write_with_retry(&data, 10) {
-                                        Some(mut r) => {
-                                            r.cks_md5 = x.data;
-                                            info!("cks_md5(md5): {}", hex::encode(&r.cks_md5));
-                                        }
-                                        None => {
-                                            error!("Failed to acquire write lock for cks_md5");
-                                        }
-                                    }
-                                    thread.unpark();
-                                }
-                                State::Stop => {
-                                    info!("Receive STOP from EAP.");
-                                    stop.store(true, Ordering::Release);
-                                }
-                                State::Sleep => {
-                                    info!("Receive SLEEP from EAP.");
-                                    sleep.store(true, Ordering::Release);
-                                    stop.store(true, Ordering::Release);
-                                }
-                                State::Quit => {
-                                    info!("Receive QUIT from EAP.");
-                                    quit.store(true, Ordering::Release);
-                                }
-                            },
-                            Err(_) => {
-                                error!("Unexpected! EAPtoUDP channel is closed.");
-                                quit.store(true, Ordering::Release);
-                            }
-                        }
+    // The UDP owner is the only EAP consumer. No detached receiver can
+    // outlive its Process and take authentication intended for a replacement.
+    fn on_eap(&mut self, message: ChannelData) {
+        match message.state {
+            State::Success => {
+                info!("Receive SUCCESS from EAP.");
+                self.data.write().unwrap_or_else(|e| e.into_inner()).cks_md5 = message.data;
+            }
+            state => {
+                self.data
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .cks_md5
+                    .clear();
+                match state {
+                    State::Stop => {
+                        info!("Receive STOP from EAP.");
+                        self.stop.store(true, Ordering::Release);
                     }
-                })
-                .expect("Can't create EAPtoUDP thread."),
-        ));
+                    State::Sleep => {
+                        info!("Receive SLEEP from EAP.");
+                        self.sleep.store(true, Ordering::Release);
+                        self.stop.store(true, Ordering::Release);
+                    }
+                    State::Quit => {
+                        info!("Receive QUIT from EAP.");
+                        self.quit.store(true, Ordering::Release);
+                    }
+                    State::Success => unreachable!(),
+                }
+            }
+        }
+    }
+
+    fn poll_eap(&mut self) {
+        while !self.stop.load(Ordering::Acquire) && !self.quit.load(Ordering::Acquire) {
+            match self.rx.try_recv() {
+                Ok(message) => self.on_eap(message),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.quit.store(true, Ordering::Release);
+                    break;
+                }
+            }
+        }
     }
 
     fn cancel_resend(&self) {
@@ -401,27 +390,30 @@ impl<'a> Process<'a> {
     }
 
     pub fn start(&mut self) -> State {
-        self.thread = Arc::new(thread::current());
         self.stop.store(false, Ordering::Release);
-        self.start_receive_eap_thread();
         self.start_receive_thread();
         self.start_send_thread();
         self.login_start();
         while !self.stop.load(Ordering::Relaxed) {
+            self.poll_eap();
             if self.quit.load(Ordering::Relaxed) {
                 debug!("UDP-Process thread quit!");
-                self.start_receive_eap_thread();
-                self.start_receive_thread();
-                self.start_send_thread();
-                self.start_heartbeat_thread();
                 return State::Quit;
+            }
+            if self.stop.load(Ordering::Acquire) {
+                break;
             }
             // Health check: a worker thread that finished without quit being
             // set has died unexpectedly (e.g. panicked); rebuild the process.
-            if self.receiver_handle.as_ref().is_some_and(|h| h.is_finished())
-                || self.resender_handle.as_ref().is_some_and(|h| h.is_finished())
+            if self
+                .receiver_handle
+                .as_ref()
+                .is_some_and(|h| h.is_finished())
+                || self
+                    .resender_handle
+                    .as_ref()
+                    .is_some_and(|h| h.is_finished())
                 || self.sender_handle.as_ref().is_some_and(|h| h.is_finished())
-                || self.receiving_eap_handle.as_ref().is_some_and(|h| h.is_finished())
             {
                 error!("Worker thread died unexpectedly, restarting UDP process.");
                 self.quit.store(true, Ordering::Release);
@@ -513,7 +505,9 @@ impl<'a> Process<'a> {
                 }
             }
         }
-        if self.sleep.load(Ordering::Relaxed) {
+        if self.quit.load(Ordering::Acquire) {
+            State::Quit
+        } else if self.sleep.load(Ordering::Relaxed) {
             State::Sleep
         } else {
             State::Stop
@@ -527,27 +521,39 @@ impl<'a> Process<'a> {
         self.sleep.store(false, Ordering::Release);
         self.send_ts.store(0, Ordering::Release);
         info!("Waiting SUCCESS message from EAP.");
-        // Wait with a timeout: after a UDP rebuild EAP stays authenticated
-        // and never resends SUCCESS, so bail out and let the outer loop
-        // rebuild (the cached SUCCESS is re-injected on rebuild).
-        let started = Local::now();
+        // A previous login's checksum must not release this wait. SUCCESS is
+        // replayed by the relay only while that EAP session remains valid.
+        self.data
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .cks_md5
+            .clear();
+        let started = Instant::now();
         loop {
-            thread::park_timeout(Duration::from_secs(30));
-            if self.quit.load(Ordering::Relaxed) {
+            self.poll_eap();
+            if self.quit.load(Ordering::Acquire) || self.stop.load(Ordering::Acquire) {
                 return;
             }
-            let ready = self
+            if !self
                 .data
-                .try_read()
-                .map(|d| !d.cks_md5.is_empty())
-                .unwrap_or(false);
-            if ready {
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .cks_md5
+                .is_empty()
+            {
                 break;
             }
-            if (Local::now() - started).num_seconds() >= 90 {
+            if started.elapsed() >= Duration::from_secs(90) {
                 error!("Timed out waiting SUCCESS from EAP, restarting UDP process.");
                 self.quit.store(true, Ordering::Release);
                 return;
+            }
+            match self.rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(message) => self.on_eap(message),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    self.quit.store(true, Ordering::Release);
+                }
             }
         }
         self.send_misc_alive()
@@ -588,6 +594,7 @@ impl<'a> Process<'a> {
                 }
                 if stop.load(Ordering::Relaxed) {
                     thread::park();
+                    continue;
                 }
                 alive.store(true, Ordering::Release);
                 thread::sleep(duration);
@@ -719,6 +726,148 @@ impl<'a> Process<'a> {
             }
         }
         self.send(data.to_vec(), true)
+    }
+}
+
+impl Drop for Process<'_> {
+    fn drop(&mut self) {
+        // Also runs during unwinding. Wake parked workers so retired sockets
+        // and channels can be released; receive/retry waits already have limits.
+        self.quit.store(true, Ordering::Release);
+        self.stop.store(true, Ordering::Release);
+        for handle in [
+            &self.receiver_handle,
+            &self.resender_handle,
+            &self.sender_handle,
+            &self.heartbeat_handle,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            handle.thread().unpark();
+        }
+    }
+}
+
+#[cfg(test)]
+mod reconnect_tests {
+    use super::*;
+    use crate::eap_relay::EapRelay;
+    use std::net::UdpSocket;
+
+    fn fixture(
+        settings: &Settings,
+        rx: Receiver<ChannelData>,
+    ) -> (Process<'_>, Receiver<(Vec<u8>, bool)>) {
+        // Bind loopback only, without starting packet workers or contacting any
+        // server. Capture the outgoing handshake intent in an in-memory queue.
+        let socket = Socket::new(UdpSocket::bind("127.0.0.1:0").unwrap());
+        let mut p = Process::new(
+            settings,
+            Arc::new(socket),
+            rx,
+            MacAddr::zero(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            "127.0.0.1:53".parse().unwrap(),
+        );
+        let (tx, outgoing) = unbounded();
+        p.send_channel = Some(tx);
+        (p, outgoing)
+    }
+
+    fn success(byte: u8) -> ChannelData {
+        ChannelData {
+            state: State::Success,
+            data: vec![byte; 16],
+        }
+    }
+
+    #[test]
+    fn rebuilt_udp_uses_cached_success_without_waiting_for_eap_to_authenticate_again() {
+        let settings = Settings::default();
+        let relay = EapRelay::default();
+        relay.publish(success(7));
+        let old = relay.subscribe();
+        let (mut udp, outgoing) = fixture(&settings, relay.subscribe());
+        udp.login_start();
+        assert!(!udp.quit.load(Ordering::Acquire));
+        assert_eq!(udp.data.read().unwrap().cks_md5, vec![7; 16]);
+        let (packet, resend) = outgoing.try_recv().unwrap();
+        assert!(resend && !packet.is_empty());
+        assert!(outgoing.try_recv().is_err());
+        // Old inbox may retain its own replay, but not this generation's data.
+        assert_eq!(old.try_recv().unwrap().data, vec![7; 16]);
+        assert!(matches!(old.try_recv(), Err(TryRecvError::Disconnected)));
+    }
+
+    #[test]
+    fn stop_sleep_and_quit_abort_pending_login_without_a_handshake() {
+        let settings = Settings::default();
+        for state in [State::Stop, State::Sleep, State::Quit] {
+            let (tx, rx) = unbounded();
+            tx.send(success(1)).unwrap();
+            tx.send(ChannelData {
+                state: state.clone(),
+                data: vec![],
+            })
+            .unwrap();
+            let (mut udp, outgoing) = fixture(&settings, rx);
+            udp.login_start();
+            assert!(outgoing.try_recv().is_err());
+            assert!(udp.data.read().unwrap().cks_md5.is_empty());
+            match state {
+                State::Quit => assert!(udp.quit.load(Ordering::Acquire)),
+                State::Sleep => {
+                    assert!(udp.sleep.load(Ordering::Acquire) && udp.stop.load(Ordering::Acquire))
+                }
+                State::Stop => assert!(udp.stop.load(Ordering::Acquire)),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn next_login_does_not_reuse_checksum_from_previous_session() {
+        let settings = Settings::default();
+        let (tx, rx) = unbounded();
+        let (mut udp, outgoing) = fixture(&settings, rx);
+        tx.send(success(1)).unwrap();
+        udp.login_start();
+        outgoing.try_recv().unwrap();
+        // An unpark token is not authentication; STOP must terminate the wait.
+        thread::current().unpark();
+        tx.send(ChannelData {
+            state: State::Stop,
+            data: vec![],
+        })
+        .unwrap();
+        tx.send(success(2)).unwrap();
+        udp.login_start();
+        assert!(udp.stop.load(Ordering::Acquire));
+        assert!(outgoing.try_recv().is_err());
+        udp.stop.store(false, Ordering::Release);
+        udp.login_start();
+        assert_eq!(udp.data.read().unwrap().cks_md5, vec![2; 16]);
+        assert!(outgoing.try_recv().is_ok());
+    }
+
+    #[test]
+    fn dropping_process_cancels_idle_sender_and_parked_resender() {
+        let settings = Settings::default();
+        let (_tx, rx) = unbounded();
+        let (mut udp, _) = fixture(&settings, rx);
+        udp.start_send_thread();
+        let sender = udp.sender_handle.as_ref().unwrap().clone();
+        let resender = udp.resender_handle.as_ref().unwrap().clone();
+        // Exercise workers after they have had a chance to enter idle waits,
+        // not only the easier case where quit is set before either starts.
+        thread::sleep(Duration::from_millis(30));
+        drop(udp);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !(sender.is_finished() && resender.is_finished()) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(sender.is_finished() && resender.is_finished());
     }
 }
 

@@ -9,32 +9,31 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
-use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
-    CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Security::SECURITY_ATTRIBUTES;
 use windows::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
 use windows::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-    SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+    SetInformationJobObject, TerminateJobObject,
 };
 use windows::Win32::System::Threading::{
-    CreateEventW, CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess,
-    InitializeProcThreadAttributeList, ResumeThread, SetEvent, SetPriorityClass, TerminateProcess,
-    UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED,
-    CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, HIGH_PRIORITY_CLASS,
-    LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-    STARTUPINFOEXW,
+    CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateEventW, CreateProcessW,
+    DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
+    HIGH_PRIORITY_CLASS, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION, ResumeThread, STARTUPINFOEXW, SetEvent,
+    SetPriorityClass, TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
 };
+use windows::core::{PCWSTR, PWSTR};
 
 use crate::paths;
 
 /// 嵌入核心的 SHA-256（十六进制小写）。
-pub const CORE_SHA256: &str = "6bdcedd20e30ae9721a7db95c8d8dbf6dd01f57e9ed50fa4b8583b2c7d16938f";
+pub const CORE_SHA256: &str = "e571bf8b366db40c43a0b4e17e8faaafe2088c242ede4856995965b2868d5083";
 
 /// 嵌入的核心可执行文件字节（编译期校验哈希，见 `ensure_core_extracted_to`）。
 pub const CORE_BYTES: &[u8] = include_bytes!("../resources/drcom4scut.exe");
@@ -638,7 +637,7 @@ fn process_name_matches(name: &[u16]) -> bool {
 mod tests {
     use super::*;
     use windows::Win32::System::JobObjects::{
-        JobObjectBasicProcessIdList, QueryInformationJobObject, JOBOBJECT_BASIC_PROCESS_ID_LIST,
+        JOBOBJECT_BASIC_PROCESS_ID_LIST, JobObjectBasicProcessIdList, QueryInformationJobObject,
     };
     use windows::Win32::System::Threading::{GetExitCodeProcess, STARTUPINFOW};
 
@@ -734,9 +733,11 @@ mod tests {
         );
         let text = String::from_utf16(&block).unwrap();
         let entries: Vec<&str> = text.split('\0').filter(|s| !s.is_empty()).collect();
-        assert!(entries
-            .iter()
-            .any(|e| e.starts_with("PATH=") && e.contains(r"C:\Windows")));
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.starts_with("PATH=") && e.contains(r"C:\Windows"))
+        );
         assert!(entries.contains(&"DRCOM_USERNAME=stu@example"));
         assert!(entries.contains(&"DRCOM_PASSWORD=secret=pass"));
         // 同名（不区分大小写）变量被凭据覆盖。

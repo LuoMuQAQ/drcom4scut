@@ -7,13 +7,12 @@ use std::time::Instant;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, Ellipse,
-    EndPaint, FillRect, GetTextExtentPoint32W, LineTo, MoveToEx, SelectObject, SetBkColor,
-    SetBkMode, SetTextColor, TextOutW, HDC, PAINTSTRUCT, SRCCOPY, TRANSPARENT,
+    BeginPaint, ClientToScreen, CreateCompatibleDC, DeleteDC, EndPaint, FillRect, SelectObject,
+    SetBkColor, SetBkMode, SetTextColor, TextOutW, HDC, PAINTSTRUCT, TRANSPARENT,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, VK_ESCAPE};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetWindowLongPtrW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetParent, GetWindowLongPtrW,
     GetWindowTextW, KillTimer, LoadCursorW, LoadImageW, MessageBoxW, PostQuitMessage,
     RegisterClassW, SendMessageW, SetCursor, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
     SetWindowTextW, ShowWindow, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HMENU, IDC_ARROW, IDC_HAND,
@@ -34,17 +33,19 @@ use crate::model::{Adapter, LinkState, Settings};
 use crate::platform::{self, NpcapStatus};
 use crate::{adapters, paths, settings};
 
-use super::anim::{bool01, lerp_color, Anim};
+use super::anim::{bool01, Anim};
 use super::layout;
 #[cfg(test)]
 #[path = "animation_render_tests.rs"]
 mod animation_render_tests;
 #[path = "display.rs"]
 mod display;
+#[path = "v3.rs"]
+mod v3;
 use super::tray::{HIconOrFile, Tray};
 use super::winutil::{
     self, brush_as_gdi, create_font, delete_gdi, destroy_icon, font_as_gdi, solid_brush, wide,
-    COLOR_ACCENT, COLOR_CARD, COLOR_DANGER, COLOR_PAGE, COLOR_TEXT_PRIMARY, COLOR_TEXT_SECONDARY,
+    COLOR_PAGE,
 };
 
 pub const WM_APP_OPEN: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 10;
@@ -88,16 +89,23 @@ enum Hit {
     Startup,
     TrayKeep,
     Combo,
+    TabConnect,
+    TabSettings,
+    Preferences,
 }
 
 struct App {
     preview: bool,
+    preferences: bool,
+    buttons: Vec<(Hit, HWND)>,
     settings: Settings,
     adapters: Vec<Adapter>,
     link_state: LinkState,
     status_title: String,
     status_detail: String,
     hwnd_user: HWND,
+    hwnd_user_label: HWND,
+    hwnd_pass_label: HWND,
     hwnd_pass: HWND,
     hwnd_eye: HWND,
     hwnd_eye_tip: HWND,
@@ -139,6 +147,7 @@ struct App {
     eye_on: Option<winutil::SvgBmp>,
     eye_off: Option<winutil::SvgBmp>,
     hover: Hit,
+    pub is_dark: bool,
     dpi: u32,
     preview_dpi: Option<u32>,
     layout_pending: bool,
@@ -165,14 +174,20 @@ impl App {
             None
         };
         let dpi = preview_dpi.unwrap_or_else(winutil::screen_dpi);
+        let is_dark = winutil::is_system_dark_mode();
+        let palette = winutil::Palette::for_dark(is_dark);
         Self {
             preview,
+            preferences: false,
+            buttons: Vec::new(),
             settings: Settings::default(),
             adapters: Vec::new(),
             link_state: LinkState::Offline,
             status_title: "未连接".into(),
             status_detail: "填写账号后点击连接".into(),
             hwnd_user: null,
+            hwnd_user_label: null,
+            hwnd_pass_label: null,
             hwnd_pass: null,
             hwnd_eye: null,
             hwnd_eye_tip: null,
@@ -199,12 +214,12 @@ impl App {
             pass_revealed: false,
             health: None,
             log_tail: LogTail::default(),
-            page_brush: solid_brush(COLOR_PAGE),
-            card_brush: solid_brush(COLOR_CARD),
-            control_brush: solid_brush(winutil::COLOR_CONTROL),
+            page_brush: solid_brush(palette.page),
+            card_brush: solid_brush(palette.card),
+            control_brush: solid_brush(palette.control),
             font: create_font(14, dpi, false),
-            font_title: create_font(20, dpi, true),
-            font_label: create_font(12, dpi, false),
+            font_title: create_font(28, dpi, true),
+            font_label: create_font(layout::CAPTION_SIZE, dpi, false),
             font_btn: create_font(14, dpi, true),
             icon_small: icon0,
             icon_title: icon0,
@@ -214,10 +229,34 @@ impl App {
             eye_on: None,
             eye_off: None,
             hover: Hit::None,
+            is_dark,
             dpi,
             preview_dpi,
             layout_pending: false,
             layout_in_progress: false,
+        }
+    }
+
+    fn update_theme(&mut self, hwnd: HWND) {
+        let is_dark = winutil::is_system_dark_mode();
+        if is_dark != self.is_dark {
+            self.is_dark = is_dark;
+            let palette = winutil::Palette::for_dark(is_dark);
+            delete_gdi(brush_as_gdi(self.page_brush));
+            delete_gdi(brush_as_gdi(self.card_brush));
+            delete_gdi(brush_as_gdi(self.control_brush));
+            self.page_brush = solid_brush(palette.page);
+            self.card_brush = solid_brush(palette.card);
+            self.control_brush = solid_brush(palette.control);
+            let px = self.s(40).max(1) as u32;
+            self.eye_on = winutil::rasterize_eye_on(px, palette.text_secondary);
+            self.eye_off = winutil::rasterize_eye_off(px, palette.text_secondary);
+            self.popup_surface = None;
+            winutil::set_window_dark_mode(hwnd, is_dark);
+            unsafe {
+                invalidate(self.hwnd_eye);
+                invalidate(hwnd);
+            }
         }
     }
 }
@@ -269,6 +308,7 @@ pub fn create_main_window() -> Option<HWND> {
         });
 
         let app_box = Box::new(App::new());
+        let is_dark = app_box.is_dark;
         let ww = app_box.s(CLIENT_W);
         let hh = app_box.s(CLIENT_H);
         let wa = winutil::work_area();
@@ -300,6 +340,7 @@ pub fn create_main_window() -> Option<HWND> {
         display::refresh(hwnd);
         initialize(hwnd);
         round_corners(hwnd);
+        winutil::set_window_dark_mode(hwnd, is_dark);
         if !platform::is_autostart_launch() {
             let _ = ShowWindow(hwnd, SW_SHOW);
         }
@@ -336,6 +377,22 @@ unsafe fn app_mut(hwnd: HWND) -> Option<&'static mut App> {
         None
     } else {
         Some(&mut *p)
+    }
+}
+
+/// 供 EDIT 子类等子控件取父窗口 App 缓存的主题状态，避免每次重绘读注册表；
+/// 父窗口未挂 App（如测试夹具）时回退系统主题。
+pub(crate) unsafe fn parent_theme_dark(child: HWND) -> bool {
+    match GetParent(child) {
+        Ok(parent) => {
+            let p = GetWindowLongPtrW(parent, GWLP_USERDATA) as *mut App;
+            if p.is_null() {
+                winutil::is_system_dark_mode()
+            } else {
+                (*p).is_dark
+            }
+        }
+        Err(_) => winutil::is_system_dark_mode(),
     }
 }
 
@@ -409,8 +466,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             LRESULT(0)
         }
+        windows::Win32::UI::WindowsAndMessaging::WM_SETTINGCHANGE => {
+            if let Some(app) = app_mut(hwnd) {
+                app.update_theme(hwnd);
+            }
+            display::schedule(hwnd);
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         windows::Win32::UI::WindowsAndMessaging::WM_DISPLAYCHANGE
-        | windows::Win32::UI::WindowsAndMessaging::WM_SETTINGCHANGE
         | windows::Win32::UI::WindowsAndMessaging::WM_EXITSIZEMOVE => {
             display::schedule(hwnd);
             DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -430,6 +493,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             close_combo(hwnd);
             LRESULT(0)
         }
+        WM_COMMAND if wparam.0 >> 16 == 0 && v3::command(hwnd, wparam.0 & 0xffff) => LRESULT(0),
         WM_COMMAND if wparam.0 == ID_EYE as usize => {
             close_combo(hwnd);
             toggle_password_reveal(hwnd);
@@ -444,34 +508,40 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         windows::Win32::UI::WindowsAndMessaging::WM_DRAWITEM => {
             let di = &*(lparam.0 as *const windows::Win32::UI::Controls::DRAWITEMSTRUCT);
+            if v3::draw_item(hwnd, di) {
+                return LRESULT(1);
+            }
             if di.CtlID == ID_EYE as u32 {
                 if let Some(app) = app_mut(hwnd) {
-                    let _ = FillRect(di.hDC, &di.rcItem, app.control_brush);
-                    if di.itemState.0 & 0x10 != 0 {
-                        winutil::fill_component(
-                            di.hDC,
-                            di.rcItem,
-                            app.dpi,
-                            winutil::COLOR_CONTROL,
-                            Some(COLOR_ACCENT),
-                        );
-                    }
-                    let bmp = if app.pass_revealed {
-                        &app.eye_off
-                    } else {
-                        &app.eye_on
-                    };
-                    if let Some(bmp) = bmp {
-                        let size = app.s(20);
-                        winutil::blit_svg(
-                            di.hDC,
-                            bmp,
-                            (di.rcItem.right - size) / 2,
-                            (di.rcItem.bottom - size) / 2,
-                            size,
-                            size,
-                        );
-                    }
+                    winutil::paint_buffered(di.hDC, di.rcItem, |dc| {
+                        let palette = winutil::Palette::for_dark(app.is_dark);
+                        let _ = FillRect(dc, &di.rcItem, app.control_brush);
+                        if di.itemState.0 & 0x10 != 0 {
+                            winutil::fill_component(
+                                dc,
+                                di.rcItem,
+                                app.dpi,
+                                palette.control,
+                                Some(palette.accent),
+                            );
+                        }
+                        let bmp = if app.pass_revealed {
+                            &app.eye_off
+                        } else {
+                            &app.eye_on
+                        };
+                        if let Some(bmp) = bmp {
+                            let size = app.s(20);
+                            winutil::blit_svg(
+                                dc,
+                                bmp,
+                                (di.rcItem.right - size) / 2,
+                                (di.rcItem.bottom - size) / 2,
+                                size,
+                                size,
+                            );
+                        }
+                    });
                 }
                 return LRESULT(1);
             }
@@ -487,8 +557,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX | WM_CTLCOLORSTATIC => {
             if let Some(app) = app_mut(hwnd) {
                 let hdc = HDC(wparam.0 as *mut _);
-                let _ = SetBkColor(hdc, winutil::COLOR_CONTROL);
-                let _ = SetTextColor(hdc, COLOR_TEXT_PRIMARY);
+                let palette = winutil::Palette::for_dark(app.is_dark);
+                let label = lparam.0 == app.hwnd_user_label.0 as isize
+                    || lparam.0 == app.hwnd_pass_label.0 as isize;
+                if label {
+                    let _ = SetBkColor(hdc, palette.page);
+                    let _ = SetTextColor(hdc, palette.text_primary);
+                    return LRESULT(app.page_brush.0 as isize);
+                }
+                let _ = SetBkColor(hdc, palette.control);
+                let _ = SetTextColor(hdc, palette.text_primary);
                 let _ = SetBkMode(hdc, windows::Win32::Graphics::Gdi::OPAQUE);
                 return LRESULT(app.control_brush.0 as isize);
             }
@@ -508,6 +586,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 .unwrap_or(Hit::None);
             if !matches!(hit, Hit::Combo) {
                 close_combo(hwnd);
+            }
+            if matches!(hit, Hit::None | Hit::Drag) {
+                // Keep keyboard navigation on this window, but release the
+                // previous EDIT/BUTTON focus and its outline on a background click.
+                let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(hwnd));
             }
             match hit {
                 Hit::Drag => {
@@ -540,6 +623,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 Hit::TrayKeep => toggle_flag(hwnd, 3, |s| {
                     s.minimize_to_tray = !s.minimize_to_tray;
                 }),
+                Hit::TabConnect => v3::switch_page(hwnd, false),
+                Hit::TabSettings | Hit::Preferences => v3::switch_page(hwnd, true),
                 Hit::None => {}
             }
             LRESULT(0)
@@ -568,6 +653,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         | Hit::Startup
                         | Hit::TrayKeep
                         | Hit::Combo
+                        | Hit::TabConnect
+                        | Hit::TabSettings
+                        | Hit::Preferences
                 ) {
                     IDC_HAND
                 } else {
@@ -639,41 +727,32 @@ fn hit_test(app: &App, x: i32, y: i32) -> Hit {
         }
         return Hit::Drag;
     }
-    if app.combo_open {
-        // 列表在独立弹出窗口中，主窗口不再命中条目。
+    for hit in [
+        Hit::TabConnect,
+        Hit::TabSettings,
+        Hit::Combo,
+        Hit::Connect,
+        Hit::Auto,
+        Hit::Remember,
+        Hit::Startup,
+        Hit::TrayKeep,
+        Hit::Preferences,
+    ] {
+        if let Some(r) = v3::bounds(app, hit) {
+            if x >= r.left && x < r.right && y >= r.top && y < r.bottom {
+                return hit;
+            }
+        }
     }
-    if x >= s(36)
-        && x <= s(384)
-        && y >= s(layout::COMBO_TOP)
-        && y <= s(layout::COMBO_TOP + layout::FIELD_HEIGHT)
-    {
-        return Hit::Combo;
-    }
-    if x >= app.eye_rect.left
+    if !app.preferences
+        && x >= app.eye_rect.left
         && x < app.eye_rect.right
         && y >= app.eye_rect.top
         && y < app.eye_rect.bottom
     {
         return Hit::Eye;
     }
-    if x >= s(20) && x <= s(400) && y >= s(layout::ACTION_TOP) && y <= s(layout::ACTION_BOTTOM) {
-        return Hit::Connect;
-    }
-    if y >= s(layout::TOGGLE_TOP - 2) && y < s(layout::TOGGLE_TOP + 26) && x >= s(36) && x <= s(384)
-    {
-        return if x < s(210) { Hit::Auto } else { Hit::Remember };
-    }
-    if y >= s(layout::TOGGLE_SECOND_TOP - 2)
-        && y < s(layout::TOGGLE_SECOND_TOP + 26)
-        && x >= s(36)
-        && x <= s(384)
-    {
-        return if x < s(210) {
-            Hit::Startup
-        } else {
-            Hit::TrayKeep
-        };
-    }
+
     Hit::None
 }
 
@@ -751,15 +830,15 @@ unsafe fn show_combo_popup(main: HWND) {
     let pad = s(8);
     let shadow = s(10);
     let content_h = pad * 2 + n * item_h;
-    let card_w = s(348);
+    let card_w = s(layout::FIELD_RIGHT - layout::FIELD_LEFT);
     let gap = s(4);
 
     let mut tl = POINT {
-        x: s(36),
+        x: s(layout::FIELD_LEFT),
         y: s(layout::COMBO_TOP),
     };
     let mut br = POINT {
-        x: s(36) + card_w,
+        x: s(layout::FIELD_LEFT) + card_w,
         y: s(layout::COMBO_TOP + layout::FIELD_HEIGHT),
     };
     let _ = ClientToScreen(main, &mut tl);
@@ -964,11 +1043,16 @@ impl PopupSurface {
         let cw = w - edge * 2;
         let ch = h - edge * 2;
         let radius = winutil::component_radius(ch, app.dpi);
+        let (card_hex, stroke_hex, shadow_opacity) = if app.is_dark {
+            ("#18181b", "#3f3f46", ".35")
+        } else {
+            ("#ffffff", "#d4d4d8", ".12")
+        };
         let svg = format!(
             r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">
           <defs><filter id="shadow" x="-50%" y="-50%" width="200%" height="200%" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="{blur}"/></filter></defs>
-          <rect x="{edge}" y="{}" width="{cw}" height="{ch}" rx="{radius}" fill="#000" opacity=".12" filter="url(#shadow)"/>
-          <rect x="{}" y="{}" width="{}" height="{}" rx="{radius}" fill="#fff" stroke="#dedede" stroke-width="1"/>
+          <rect x="{edge}" y="{}" width="{cw}" height="{ch}" rx="{radius}" fill="#000" opacity="{shadow_opacity}" filter="url(#shadow)"/>
+          <rect x="{}" y="{}" width="{}" height="{}" rx="{radius}" fill="{card_hex}" stroke="{stroke_hex}" stroke-width="1"/>
           </svg>"##,
             edge + app.s(2),
             edge as f32 + 0.5,
@@ -1064,6 +1148,7 @@ unsafe fn paint_combo_popup_ui(app: &App, hdc: HDC, w: i32, h: i32) {
     };
     let s = |v: i32| app.s(v);
     let shadow = s(10);
+    let palette = winutil::Palette::for_dark(app.is_dark);
     let _ = SetBkMode(hdc, TRANSPARENT);
     let saved = windows::Win32::Graphics::Gdi::SaveDC(hdc);
     let _ = windows::Win32::Graphics::Gdi::IntersectClipRect(
@@ -1087,9 +1172,17 @@ unsafe fn paint_combo_popup_ui(app: &App, hdc: HDC, w: i32, h: i32) {
         let hovered = app.combo_hot == i;
         if selected || hovered {
             let bg = if selected {
-                windows::Win32::Foundation::COLORREF(0x00FCF3EB)
+                if app.is_dark {
+                    windows::Win32::Foundation::COLORREF(0x00622E00) // #002E62 选中有色高亮
+                } else {
+                    windows::Win32::Foundation::COLORREF(0x00FEF1E6) // #E6F1FE 浅蓝底
+                }
             } else {
-                windows::Win32::Foundation::COLORREF(0x00F5F5F5)
+                if app.is_dark {
+                    palette.control
+                } else {
+                    palette.page
+                }
             };
             winutil::fill_component(
                 hdc,
@@ -1105,7 +1198,7 @@ unsafe fn paint_combo_popup_ui(app: &App, hdc: HDC, w: i32, h: i32) {
             );
         }
         if selected {
-            let bar = solid_brush(COLOR_ACCENT);
+            let bar = solid_brush(palette.accent);
             let prev = SelectObject(hdc, brush_as_gdi(bar));
             let _ = windows::Win32::Graphics::Gdi::RoundRect(
                 hdc,
@@ -1123,7 +1216,7 @@ unsafe fn paint_combo_popup_ui(app: &App, hdc: HDC, w: i32, h: i32) {
             paint_text(
                 hdc,
                 app.font,
-                COLOR_TEXT_PRIMARY,
+                palette.text_primary,
                 shadow + s(20),
                 y + s(10),
                 "自动选择",
@@ -1132,7 +1225,7 @@ unsafe fn paint_combo_popup_ui(app: &App, hdc: HDC, w: i32, h: i32) {
             paint_text(
                 hdc,
                 app.font,
-                COLOR_TEXT_PRIMARY,
+                palette.text_primary,
                 shadow + s(20),
                 y + s(4),
                 &a.name,
@@ -1145,7 +1238,7 @@ unsafe fn paint_combo_popup_ui(app: &App, hdc: HDC, w: i32, h: i32) {
             paint_text(
                 hdc,
                 app.font_label,
-                COLOR_TEXT_SECONDARY,
+                palette.text_secondary,
                 shadow + s(20),
                 y + s(22),
                 &sub,
@@ -1168,7 +1261,12 @@ unsafe fn toggle_flag(hwnd: HWND, which: usize, f: impl FnOnce(&mut Settings)) {
         app.toggle_anim[which] = Anim::go(from, bool01(on), TOGGLE_ANIM_MS);
         let rc = toggle_rect(app, which);
         start_anim_timer(hwnd);
-        let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), Some(&rc), false);
+        if let Some(app) = app_mut(hwnd) {
+            let hit = [Hit::Auto, Hit::Remember, Hit::Startup, Hit::TrayKeep][which];
+            if !v3::repaint_button(app, hit) {
+                let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), Some(&rc), false);
+            }
+        }
     }
 }
 
@@ -1201,10 +1299,13 @@ unsafe fn start_anim_timer(hwnd: HWND) {
 
 unsafe fn invalidate_combo(hwnd: HWND) {
     if let Some(app) = app_mut(hwnd) {
+        if v3::repaint_button(app, Hit::Combo) {
+            return;
+        }
         let rc = RECT {
-            left: app.s(36) - 2,
+            left: app.s(layout::FIELD_LEFT) - 2,
             top: app.s(layout::COMBO_TOP) - 2,
-            right: app.s(384) + 2,
+            right: app.s(layout::FIELD_RIGHT) + 2,
             bottom: app.s(layout::COMBO_TOP + layout::FIELD_HEIGHT) + 2,
         };
         let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), Some(&rc), false);
@@ -1215,6 +1316,9 @@ unsafe fn invalidate_hover(hwnd: HWND, hit: Hit) {
     let Some(app) = app_mut(hwnd) else {
         return;
     };
+    if v3::repaint_button(app, hit) {
+        return;
+    }
     let rect = match hit {
         Hit::Min => RECT {
             left: CLIENT_W - 92,
@@ -1246,18 +1350,15 @@ unsafe fn invalidate_hover(hwnd: HWND, hit: Hit) {
 }
 
 fn toggle_rect(app: &App, which: usize) -> RECT {
-    let x = if which % 2 == 0 { 154 } else { 344 };
-    let y = if which < 2 {
-        layout::TOGGLE_TOP
-    } else {
-        layout::TOGGLE_SECOND_TOP
-    };
-    RECT {
-        left: app.s(x - 1),
-        top: app.s(y - 1),
-        right: app.s(x + 41),
-        bottom: app.s(y + 21),
-    }
+    let hit = [Hit::Auto, Hit::Remember, Hit::Startup, Hit::TrayKeep][which];
+    v3::bounds(app, hit)
+        .map(|r| RECT {
+            left: r.left - 2,
+            top: r.top - 2,
+            right: r.right + 2,
+            bottom: r.bottom + 2,
+        })
+        .unwrap_or_default()
 }
 
 unsafe fn on_anim_timer(hwnd: HWND) {
@@ -1267,8 +1368,11 @@ unsafe fn on_anim_timer(hwnd: HWND) {
     let now = Instant::now();
     for i in 0..4 {
         if app.toggle_anim[i].advance(now) {
-            let rc = toggle_rect(app, i);
-            let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), Some(&rc), false);
+            let hit = [Hit::Auto, Hit::Remember, Hit::Startup, Hit::TrayKeep][i];
+            if !v3::repaint_button(app, hit) {
+                let rc = toggle_rect(app, i);
+                let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), Some(&rc), false);
+            }
         }
     }
     let combo_changed = app.combo_visual.advance(now);
@@ -1297,6 +1401,19 @@ unsafe fn create_controls(hwnd: HWND) {
     let user_rc = controls.user;
     let pass_rc = controls.pass;
     app.eye_rect = controls.eye_hit;
+    app.hwnd_user_label = create_child(
+        hwnd,
+        w!("STATIC"),
+        w!("学号"),
+        WS_CHILD | WS_VISIBLE,
+        WINDOW_EX_STYLE(0),
+        app.s(30),
+        app.s(layout::USER_TOP - 26),
+        app.s(420),
+        app.s(20),
+        1020,
+    );
+    set_font(app.hwnd_user_label, font);
     let user = create_child(
         hwnd,
         w!("EDIT"),
@@ -1309,6 +1426,19 @@ unsafe fn create_controls(hwnd: HWND) {
         user_rc.bottom - user_rc.top,
         ID_USER,
     );
+    app.hwnd_pass_label = create_child(
+        hwnd,
+        w!("STATIC"),
+        w!("密码"),
+        WS_CHILD | WS_VISIBLE,
+        WINDOW_EX_STYLE(0),
+        app.s(30),
+        app.s(layout::PASS_TOP - 26),
+        app.s(420),
+        app.s(20),
+        1021,
+    );
+    set_font(app.hwnd_pass_label, font);
     let pass = create_child(
         hwnd,
         w!("EDIT"),
@@ -1342,6 +1472,7 @@ unsafe fn create_controls(hwnd: HWND) {
         controls.eye.bottom - controls.eye.top,
         ID_EYE,
     );
+    winutil::suppress_button_erase(app.hwnd_eye);
     set_font(app.hwnd_eye, font);
     use windows::Win32::UI::Controls::{
         TOOLTIPS_CLASSW, TTF_IDISHWND, TTF_SUBCLASS, TTM_ADDTOOLW, TTTOOLINFOW as TOOLINFOW,
@@ -1375,6 +1506,7 @@ unsafe fn create_controls(hwnd: HWND) {
         None,
         Some(LPARAM(&info as *const _ as isize)),
     );
+    v3::create_buttons(hwnd);
 }
 
 unsafe fn initialize(hwnd: HWND) {
@@ -1388,8 +1520,14 @@ unsafe fn initialize(hwnd: HWND) {
         snap_toggle_anims(app);
         app.logo_title = winutil::rasterize_app_svg(app.s(52) as u32);
         app.logo_status = winutil::rasterize_app_svg(app.s(152) as u32);
-        app.eye_on = winutil::rasterize_eye_on(app.s(40) as u32);
-        app.eye_off = winutil::rasterize_eye_off(app.s(40) as u32);
+        app.eye_on = winutil::rasterize_eye_on(
+            app.s(40) as u32,
+            winutil::Palette::for_dark(app.is_dark).text_secondary,
+        );
+        app.eye_off = winutil::rasterize_eye_off(
+            app.s(40) as u32,
+            winutil::Palette::for_dark(app.is_dark).text_secondary,
+        );
         invalidate(hwnd);
         return;
     }
@@ -1416,8 +1554,14 @@ unsafe fn initialize(hwnd: HWND) {
     let dpi = app.dpi;
     app.logo_title = winutil::rasterize_app_svg(winutil::scale(52, dpi) as u32);
     app.logo_status = winutil::rasterize_app_svg(winutil::scale(152, dpi) as u32);
-    app.eye_on = winutil::rasterize_eye_on(winutil::scale(40, dpi) as u32);
-    app.eye_off = winutil::rasterize_eye_off(winutil::scale(40, dpi) as u32);
+    app.eye_on = winutil::rasterize_eye_on(
+        winutil::scale(40, dpi) as u32,
+        winutil::Palette::for_dark(app.is_dark).text_secondary,
+    );
+    app.eye_off = winutil::rasterize_eye_off(
+        winutil::scale(40, dpi) as u32,
+        winutil::Palette::for_dark(app.is_dark).text_secondary,
+    );
 
     if paths::is_installed() {
         match paths::ensure_dirs() {
@@ -1882,6 +2026,9 @@ unsafe fn refresh_tray(app: &App) {
 }
 
 unsafe fn invalidate(hwnd: HWND) {
+    if let Some(app) = app_mut(hwnd) {
+        v3::repaint_buttons(app);
+    }
     let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), None, false);
 }
 
@@ -1979,339 +2126,19 @@ unsafe fn set_password_reveal(hwnd: HWND, on: bool) {
 }
 
 unsafe fn paint(hwnd: HWND, hdc: HDC, damage: RECT) {
-    use windows::Win32::Graphics::Gdi::{
-        SetBrushOrgEx, SetGraphicsMode, SetStretchBltMode, SetWorldTransform, StretchBlt,
-        GM_ADVANCED, HALFTONE, XFORM,
-    };
-    // HALFTONE samples neighboring pixels. Render a guard band so partial
-    // updates have identical antialiasing to a full-window paint.
-    let saved = windows::Win32::Graphics::Gdi::SaveDC(hdc);
-    let _ = windows::Win32::Graphics::Gdi::IntersectClipRect(
-        hdc,
-        damage.left,
-        damage.top,
-        damage.right,
-        damage.bottom,
-    );
     let mut client = RECT::default();
     let _ = GetClientRect(hwnd, &mut client);
-    let damage = RECT {
-        left: (damage.left - 4).max(0),
-        top: (damage.top - 4).max(0),
-        right: (damage.right + 4).min(client.right),
-        bottom: (damage.bottom + 4).min(client.bottom),
+    let r = RECT {
+        left: damage.left.max(0),
+        top: damage.top.max(0),
+        right: damage.right.min(client.right),
+        bottom: damage.bottom.min(client.bottom),
     };
-    // Keep supersampling, but allocate and downsample only the damaged area.
-    // A 40x20 toggle must not rebuild a 1680x2096 full-window bitmap each tick.
-    let w = damage.right - damage.left;
-    let h = damage.bottom - damage.top;
-    if w <= 0 || h <= 0 {
-        let _ = windows::Win32::Graphics::Gdi::RestoreDC(hdc, saved);
-        return;
-    }
-    let sw = w * 4;
-    let sh = h * 4;
-    let mem = CreateCompatibleDC(Some(hdc));
-    let bmp = CreateCompatibleBitmap(hdc, sw, sh);
-    let old = SelectObject(mem, windows::Win32::Graphics::Gdi::HGDIOBJ(bmp.0));
-    let _ = SetGraphicsMode(mem, GM_ADVANCED);
-    let xf = XFORM {
-        eM11: 4.0,
-        eM12: 0.0,
-        eM21: 0.0,
-        eM22: 4.0,
-        eDx: -(damage.left * 4) as f32,
-        eDy: -(damage.top * 4) as f32,
-    };
-    let _ = SetWorldTransform(mem, &xf);
-    paint_ui(hwnd, mem);
-    let identity = XFORM {
-        eM11: 1.0,
-        eM12: 0.0,
-        eM21: 0.0,
-        eM22: 1.0,
-        eDx: 0.0,
-        eDy: 0.0,
-    };
-    let _ = SetWorldTransform(mem, &identity);
-    let _ = SetStretchBltMode(hdc, HALFTONE);
-    let _ = SetBrushOrgEx(hdc, 0, 0, None);
-    let _ = StretchBlt(
-        hdc,
-        damage.left,
-        damage.top,
-        w,
-        h,
-        Some(mem),
-        0,
-        0,
-        sw,
-        sh,
-        SRCCOPY,
-    );
-    let _ = SelectObject(mem, old);
-    let _ =
-        windows::Win32::Graphics::Gdi::DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(bmp.0));
-    let _ = DeleteDC(mem);
-    let _ = windows::Win32::Graphics::Gdi::RestoreDC(hdc, saved);
+    winutil::paint_buffered(hdc, r, |mem| paint_ui(hwnd, mem));
 }
 
 unsafe fn paint_ui(hwnd: HWND, hdc: HDC) {
-    let Some(app) = app_mut(hwnd) else {
-        return;
-    };
-    let s = |v: i32| app.s(v);
-    let mut rc = RECT::default();
-    let _ = GetClientRect(hwnd, &mut rc);
-    let _ = FillRect(hdc, &rc, app.page_brush);
-    let _ = SetBkMode(hdc, TRANSPARENT);
-
-    winutil::fill_component(
-        hdc,
-        RECT {
-            left: 0,
-            top: 0,
-            right: s(CLIENT_W),
-            bottom: s(CLIENT_H),
-        },
-        app.dpi,
-        winutil::COLOR_PAGE,
-        Some(winutil::COLOR_WINDOW_BORDER),
-    );
-
-    if let Some(logo) = &app.logo_title {
-        winutil::blit_svg(hdc, logo, s(layout::OUTER_PADDING), s(7), s(26), s(26));
-    }
-    paint_caption_btn(
-        hdc,
-        app,
-        s(CLIENT_W) - s(92),
-        0,
-        s(46),
-        s(TITLE_H),
-        app.hover == Hit::Min,
-        false,
-    );
-    paint_caption_btn(
-        hdc,
-        app,
-        s(CLIENT_W) - s(46),
-        0,
-        s(46),
-        s(TITLE_H),
-        app.hover == Hit::Close,
-        true,
-    );
-
-    winutil::fill_component(
-        hdc,
-        RECT {
-            left: s(layout::CARD_LEFT),
-            top: s(layout::STATUS_TOP),
-            right: s(layout::CARD_RIGHT),
-            bottom: s(layout::STATUS_BOTTOM),
-        },
-        app.dpi,
-        COLOR_CARD,
-        Some(winutil::COLOR_STROKE),
-    );
-    let dot = winutil::state_color(app.link_state);
-    let brush = solid_brush(dot);
-    let prev = SelectObject(hdc, brush_as_gdi(brush));
-    let _ = Ellipse(
-        hdc,
-        s(36),
-        s(layout::STATUS_TOP + 38),
-        s(48),
-        s(layout::STATUS_TOP + 50),
-    );
-    let _ = SelectObject(hdc, prev);
-    delete_gdi(brush_as_gdi(brush));
-    paint_text(
-        hdc,
-        app.font_title,
-        COLOR_TEXT_PRIMARY,
-        s(56),
-        s(layout::STATUS_TOP + 20),
-        &app.status_title,
-    );
-    paint_text(
-        hdc,
-        app.font_label,
-        COLOR_TEXT_SECONDARY,
-        s(56),
-        s(layout::STATUS_TOP + 50),
-        &app.status_detail,
-    );
-    if let Some(logo) = &app.logo_status {
-        winutil::blit_svg(
-            hdc,
-            logo,
-            s(308),
-            s(layout::STATUS_TOP + (layout::STATUS_HEIGHT - 76) / 2),
-            s(76),
-            s(76),
-        );
-    }
-
-    winutil::fill_component(
-        hdc,
-        RECT {
-            left: s(layout::CARD_LEFT),
-            top: s(layout::ACCOUNT_TOP),
-            right: s(layout::CARD_RIGHT),
-            bottom: s(layout::ACCOUNT_BOTTOM),
-        },
-        app.dpi,
-        COLOR_CARD,
-        Some(winutil::COLOR_STROKE),
-    );
-    paint_text(
-        hdc,
-        app.font,
-        COLOR_TEXT_PRIMARY,
-        s(46),
-        s(layout::ACCOUNT_TOP + layout::CARD_PADDING),
-        "账号",
-    );
-    paint_text(
-        hdc,
-        app.font_label,
-        COLOR_TEXT_SECONDARY,
-        s(46),
-        s(layout::USER_TOP - 18),
-        "学号",
-    );
-    let focus = windows::Win32::UI::Input::KeyboardAndMouse::GetFocus();
-    paint_field(
-        hdc,
-        app,
-        s(36),
-        s(layout::USER_TOP),
-        s(348),
-        s(36),
-        focus == app.hwnd_user,
-    );
-    paint_text(
-        hdc,
-        app.font_label,
-        COLOR_TEXT_SECONDARY,
-        s(46),
-        s(layout::PASS_TOP - 18),
-        "密码",
-    );
-    paint_field(
-        hdc,
-        app,
-        s(36),
-        s(layout::PASS_TOP),
-        s(348),
-        s(36),
-        focus == app.hwnd_pass,
-    );
-    paint_text(
-        hdc,
-        app.font_label,
-        COLOR_TEXT_SECONDARY,
-        s(46),
-        s(layout::COMBO_TOP - 18),
-        "网卡",
-    );
-    paint_field(
-        hdc,
-        app,
-        s(36),
-        s(layout::COMBO_TOP),
-        s(348),
-        s(36),
-        app.combo_open || app.combo_visual.value() > 0.08,
-    );
-    let combo_txt = combo_label(app);
-    paint_text_centered(
-        hdc,
-        app.font,
-        COLOR_TEXT_PRIMARY,
-        s(46),
-        s(layout::COMBO_TOP),
-        s(300),
-        s(36),
-        &combo_txt,
-    );
-    paint_chevron(
-        hdc,
-        s(368),
-        s(layout::COMBO_TOP) + s(18),
-        s(8),
-        app.combo_visual.value(),
-    );
-
-    paint_toggle_row(
-        hdc,
-        app,
-        s(36),
-        s(layout::TOGGLE_TOP),
-        "启动后自动连接",
-        app.toggle_anim[0].value(),
-        "保留密码",
-        app.toggle_anim[1].value(),
-        s(220),
-        s(344),
-    );
-    paint_toggle_row(
-        hdc,
-        app,
-        s(36),
-        s(layout::TOGGLE_SECOND_TOP),
-        "开机启动",
-        app.toggle_anim[2].value(),
-        "保留系统托盘",
-        app.toggle_anim[3].value(),
-        s(220),
-        s(344),
-    );
-
-    let disconnect = app.desired_running
-        || matches!(
-            app.link_state,
-            LinkState::Online | LinkState::Connecting | LinkState::Waiting
-        );
-    let hovered = app.hover == Hit::Connect;
-    let bg = if !app.connect_enabled {
-        windows::Win32::Foundation::COLORREF(0x00FAD6B4)
-    } else if disconnect {
-        if hovered {
-            windows::Win32::Foundation::COLORREF(0x000D26A1)
-        } else {
-            COLOR_DANGER
-        }
-    } else if hovered {
-        winutil::COLOR_ACCENT_HOVER
-    } else {
-        COLOR_ACCENT
-    };
-    winutil::fill_component(
-        hdc,
-        RECT {
-            left: s(layout::CARD_LEFT),
-            top: s(layout::ACTION_TOP),
-            right: s(layout::CARD_RIGHT),
-            bottom: s(layout::ACTION_BOTTOM),
-        },
-        app.dpi,
-        bg,
-        None,
-    );
-    let label = if disconnect { "断开" } else { "连接" };
-    paint_text_centered(
-        hdc,
-        app.font_btn,
-        windows::Win32::Foundation::COLORREF(0x00FFFFFF),
-        s(20),
-        s(layout::ACTION_TOP),
-        s(380),
-        s(36),
-        label,
-    );
+    v3::paint_ui(hwnd, hdc);
 }
 
 fn combo_label(app: &App) -> String {
@@ -2331,33 +2158,25 @@ fn combo_label(app: &App) -> String {
     }
 }
 
-unsafe fn paint_chevron(hdc: HDC, cx: i32, cy: i32, arm: i32, t: f32) {
-    use windows::Win32::Graphics::Gdi::{GetWorldTransform, SetWorldTransform, XFORM};
-    let mut original = XFORM::default();
-    let _ = GetWorldTransform(hdc, &mut original);
-    let (sin, cos) = (std::f32::consts::PI * t).sin_cos();
-    let rotated = XFORM {
-        eM11: cos * original.eM11,
-        eM12: sin * original.eM22,
-        eM21: -sin * original.eM11,
-        eM22: cos * original.eM22,
-        eDx: original.eDx + cx as f32 * original.eM11,
-        eDy: original.eDy + cy as f32 * original.eM22,
-    };
-    let _ = SetWorldTransform(hdc, &rotated);
-    let pen = windows::Win32::Graphics::Gdi::CreatePen(
-        windows::Win32::Graphics::Gdi::PS_SOLID,
-        (arm / 4).max(1),
-        COLOR_TEXT_SECONDARY,
+unsafe fn paint_chevron(
+    hdc: HDC,
+    cx: i32,
+    cy: i32,
+    arm: i32,
+    t: f32,
+    color: windows::Win32::Foundation::COLORREF,
+) {
+    super::hero::chevron(
+        hdc,
+        RECT {
+            left: cx - arm * 2,
+            top: cy - arm * 2,
+            right: cx + arm * 2,
+            bottom: cy + arm * 2,
+        },
+        color,
+        t,
     );
-    let old = SelectObject(hdc, windows::Win32::Graphics::Gdi::HGDIOBJ(pen.0));
-    let _ = MoveToEx(hdc, -arm, -arm / 2, None);
-    let _ = LineTo(hdc, 0, arm / 2);
-    let _ = LineTo(hdc, arm, -arm / 2);
-    let _ = SelectObject(hdc, old);
-    let _ =
-        windows::Win32::Graphics::Gdi::DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(pen.0));
-    let _ = SetWorldTransform(hdc, &original);
 }
 
 unsafe fn paint_text(
@@ -2377,124 +2196,6 @@ unsafe fn paint_text(
     let _ = SelectObject(hdc, old);
 }
 
-unsafe fn paint_text_centered(
-    hdc: HDC,
-    font: windows::Win32::Graphics::Gdi::HFONT,
-    color: windows::Win32::Foundation::COLORREF,
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    s: &str,
-) {
-    let old = SelectObject(hdc, font_as_gdi(font));
-    let _ = SetTextColor(hdc, color);
-    let t = wide(s);
-    let mut sz = windows::Win32::Foundation::SIZE::default();
-    if t.len() > 1 {
-        let _ = GetTextExtentPoint32W(hdc, &t[..t.len() - 1], &mut sz);
-        let tx = x + (w - sz.cx) / 2;
-        let ty = y + (h - sz.cy) / 2;
-        let _ = TextOutW(hdc, tx, ty, &t[..t.len() - 1]);
-    }
-    let _ = SelectObject(hdc, old);
-}
-
-unsafe fn paint_field(hdc: HDC, app: &App, x: i32, y: i32, w: i32, h: i32, focus: bool) {
-    let border = if focus {
-        COLOR_ACCENT
-    } else {
-        winutil::COLOR_STROKE
-    };
-    winutil::fill_component(
-        hdc,
-        RECT {
-            left: x,
-            top: y,
-            right: x + w,
-            bottom: y + h,
-        },
-        app.dpi,
-        winutil::COLOR_CONTROL,
-        Some(border),
-    );
-}
-
-unsafe fn paint_toggle_row(
-    hdc: HDC,
-    app: &App,
-    x: i32,
-    y: i32,
-    left: &str,
-    left_t: f32,
-    right: &str,
-    right_t: f32,
-    right_x: i32,
-    toggle2_x: i32,
-) {
-    paint_text(
-        hdc,
-        app.font_label,
-        COLOR_TEXT_PRIMARY,
-        x,
-        y + app.s(2),
-        left,
-    );
-    paint_toggle(hdc, app, x + app.s(118), y, left_t);
-    paint_text(
-        hdc,
-        app.font_label,
-        COLOR_TEXT_PRIMARY,
-        right_x,
-        y + app.s(2),
-        right,
-    );
-    paint_toggle(hdc, app, toggle2_x, y, right_t);
-}
-
-unsafe fn paint_toggle(hdc: HDC, app: &App, x: i32, y: i32, t: f32) {
-    use windows::Win32::Graphics::Gdi::{GetWorldTransform, SetWorldTransform, XFORM};
-    let w = app.s(40);
-    let h = app.s(20);
-    let fill = lerp_color(winutil::COLOR_TOGGLE_OFF, COLOR_ACCENT, t);
-    winutil::fill_round(
-        hdc,
-        RECT {
-            left: x,
-            top: y,
-            right: x + w,
-            bottom: y + h,
-        },
-        h / 2,
-        fill,
-        None,
-    );
-    let thumb = app.s(16);
-    let inset = (h - thumb) as f32 / 2.0;
-    let travel = (w - thumb) as f32 - inset * 2.0;
-    let tx = x as f32 + inset + travel * t.clamp(0.0, 1.0);
-    let ty = y as f32 + inset;
-    let mut original = XFORM::default();
-    let _ = GetWorldTransform(hdc, &mut original);
-    let mut shifted = original;
-    shifted.eDx += tx.fract() * original.eM11;
-    shifted.eDy += ty.fract() * original.eM22;
-    let _ = SetWorldTransform(hdc, &shifted);
-    winutil::fill_round(
-        hdc,
-        RECT {
-            left: tx as i32,
-            top: ty as i32,
-            right: tx as i32 + thumb,
-            bottom: ty as i32 + thumb,
-        },
-        thumb / 2,
-        COLOR_CARD,
-        None,
-    );
-    let _ = SetWorldTransform(hdc, &original);
-}
-
 unsafe fn paint_caption_btn(
     hdc: HDC,
     app: &App,
@@ -2505,11 +2206,12 @@ unsafe fn paint_caption_btn(
     hover: bool,
     close: bool,
 ) {
+    let palette = winutil::Palette::for_dark(app.is_dark);
     if hover {
         let fill = if close {
-            COLOR_DANGER
+            palette.danger
         } else {
-            windows::Win32::Foundation::COLORREF(0x00E8E8E8)
+            palette.stroke_hover
         };
         winutil::fill_component(
             hdc,
@@ -2527,24 +2229,24 @@ unsafe fn paint_caption_btn(
     let color = if hover && close {
         windows::Win32::Foundation::COLORREF(0x00FFFFFF)
     } else {
-        COLOR_TEXT_PRIMARY
+        palette.text_primary
     };
-    let pen =
-        windows::Win32::Graphics::Gdi::CreatePen(windows::Win32::Graphics::Gdi::PS_SOLID, 1, color);
-    let old = SelectObject(hdc, windows::Win32::Graphics::Gdi::HGDIOBJ(pen.0));
+    let size = app.s(20);
     let cx = x + bw / 2;
     let cy = y + bh / 2;
-    let arm = (bw / 9).max(5);
-    if close {
-        let _ = MoveToEx(hdc, cx - arm, cy - arm, None);
-        let _ = LineTo(hdc, cx + arm + 1, cy + arm + 1);
-        let _ = MoveToEx(hdc, cx + arm, cy - arm, None);
-        let _ = LineTo(hdc, cx - arm - 1, cy + arm + 1);
-    } else {
-        let _ = MoveToEx(hdc, cx - arm, cy, None);
-        let _ = LineTo(hdc, cx + arm + 1, cy);
-    }
-    let _ = SelectObject(hdc, old);
-    let _ =
-        windows::Win32::Graphics::Gdi::DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(pen.0));
+    super::hero::icon(
+        hdc,
+        RECT {
+            left: cx - size / 2,
+            top: cy - size / 2,
+            right: cx - size / 2 + size,
+            bottom: cy - size / 2 + size,
+        },
+        color,
+        if close {
+            super::hero::Icon::Close
+        } else {
+            super::hero::Icon::Minus
+        },
+    );
 }

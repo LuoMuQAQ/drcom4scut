@@ -173,6 +173,35 @@ mod tests {
         m.observe(t, Some(&s.lines().map(str::to_owned).collect::<Vec<_>>()))
     }
     #[test]
+    fn receive_and_success_wait_failures_require_udp_recovery_evidence() {
+        for error in [
+            "Receive error: os error 10060",
+            "Timed out waiting SUCCESS from EAP, restarting UDP process.",
+        ] {
+            let t = Instant::now();
+            let mut m = HealthMonitor::new(t);
+            observe(&mut m, t, "Heartbeat done.");
+            let failed = observe(&mut m, t + Duration::from_secs(2), error);
+            assert_eq!(failed.state, LinkState::Degraded);
+            assert!(!failed.restart_stalled && !failed.stable);
+            let eap_only = observe(
+                &mut m,
+                t + Duration::from_secs(4),
+                "Send Heartbeat(Response, Identity) packet.",
+            );
+            assert_eq!(eap_only.state, LinkState::Degraded);
+            let recovered = observe(&mut m, t + Duration::from_secs(6), "Heartbeat done.");
+            assert_eq!(recovered.state, LinkState::Online);
+            assert!(!recovered.restart_stalled && !recovered.stable);
+            for second in (18..=126).step_by(12) {
+                let d = observe(&mut m, t + Duration::from_secs(second), "Heartbeat done.");
+                assert!(!d.restart_stalled);
+                assert_eq!(d.stable, second >= 126);
+            }
+        }
+    }
+
+    #[test]
     fn repeated_errors_and_empty_startup_have_bounded_recovery() {
         let t = Instant::now();
         for repeated_error in [false, true] {

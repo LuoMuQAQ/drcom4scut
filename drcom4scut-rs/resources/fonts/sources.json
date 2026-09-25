@@ -1,0 +1,28 @@
+{
+  "source": "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/Variable/TTF/Subset/NotoSansSC-VF.ttf",
+  "source_sha256": "d68bafcb48a2707749396aa12bbbd833cb70401f3a9a689fd2902c7e0d295964",
+  "revision": "f8d157532fbfaeda587e826d4cd5b21a49186f7c",
+  "fonttools": "4.66.0",
+  "zlib": "1.3.1",
+  "modification": "Static weight instances (400/500); names updated by fontTools; original glyph coverage retained; no UI-string subsetting.",
+  "license_source": "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/LICENSE",
+  "license_sha256": "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2",
+  "files": [
+    {
+      "file": "NotoSansSC-Regular.ttf.zlib",
+      "weight": 400,
+      "uncompressed_bytes": 10596252,
+      "uncompressed_sha256": "ee0196181d143544016fdae98b4fa83db18536c249068fec361c5a60ef3d9fb7",
+      "stored_bytes": 6303604,
+      "stored_sha256": "dca5ea6c479dddc9562e811b881e0032e0939222c8a9418245dd640e446198c7"
+    },
+    {
+      "file": "NotoSansSC-Medium.ttf.zlib",
+      "weight": 500,
+      "uncompressed_bytes": 10589452,
+      "uncompressed_sha256": "b971a3493feabc2dcff765cebe9d0f147bae8051081d34ccaf5935b99811de68",
+      "stored_bytes": 6347017,
+      "stored_sha256": "3067baad88499d6fa395124a2f625180e9c11689f1d2e5fb76bc11daaa6554e9"
+    }
+  ]
+}

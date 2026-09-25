@@ -1,28 +1,32 @@
 //! Setup-only window. All privileged work runs outside the UI thread.
 use drcom4scut_gui::{
     install::{
+        GUI_EXE_NAME,
         driver::{self, DriverStatus},
         driver_flow,
         flow::{self, InstallOptions, InstallResult},
-        knownfolder, origin, ui, GUI_EXE_NAME,
+        knownfolder, origin, ui,
     },
-    ui::winutil::*,
+    ui::hero::{self, Icon},
+    ui::winutil::{self, *},
 };
 use std::{
     path::PathBuf,
     sync::mpsc::{self, Receiver},
 };
 use windows::{
-    core::{w, PCWSTR},
     Win32::{
         Foundation::*,
         Graphics::Gdi::*,
         UI::{
-            Controls::{DRAWITEMSTRUCT, ODS_FOCUS, ODS_SELECTED},
-            Input::KeyboardAndMouse::{EnableWindow, SetFocus, TrackMouseEvent, TRACKMOUSEEVENT, TRACKMOUSEEVENT_FLAGS},
+            Controls::{DRAWITEMSTRUCT, ODS_SELECTED},
+            Input::KeyboardAndMouse::{
+                EnableWindow, SetFocus, TRACKMOUSEEVENT, TRACKMOUSEEVENT_FLAGS, TrackMouseEvent,
+            },
             WindowsAndMessaging::*,
         },
     },
+    core::{PCWSTR, w},
 };
 
 const PRIMARY: isize = 3001;
@@ -31,37 +35,38 @@ const CLOSE: isize = 3003;
 const TME_LEAVE: TRACKMOUSEEVENT_FLAGS = TRACKMOUSEEVENT_FLAGS(0x2);
 const WM_MOUSELEAVE: u32 = 0x02A3;
 #[derive(PartialEq)]
-enum Page {
+pub(crate) enum Page {
     Configure,
     Running,
     Finished,
 }
-struct State {
-    dpi: u32,
-    font: HFONT,
-    small: HFONT,
-    title: HFONT,
-    card: HBRUSH,
-    field: HBRUSH,
-    controls: Vec<HWND>,
-    path: HWND,
-    browse: HWND,
-    desktop: HWND,
-    menu: HWND,
-    launch: HWND,
-    primary: HWND,
-    secondary: HWND,
-    close: HWND,
-    hot: isize,
-    page: Page,
-    options: InstallOptions,
-    detection: Receiver<DriverStatus>,
-    driver_text: String,
-    work: Option<(PathBuf, Receiver<Result<(), String>>)>,
-    result: Option<InstallResult>,
-    percent: u32,
-    message: String,
-    cancelling: bool,
+pub(crate) struct State {
+    pub(crate) is_dark: bool,
+    pub(crate) dpi: u32,
+    pub(crate) font: HFONT,
+    pub(crate) small: HFONT,
+    pub(crate) title: HFONT,
+    pub(crate) card: HBRUSH,
+    pub(crate) field: HBRUSH,
+    pub(crate) controls: Vec<HWND>,
+    pub(crate) path: HWND,
+    pub(crate) browse: HWND,
+    pub(crate) desktop: HWND,
+    pub(crate) menu: HWND,
+    pub(crate) launch: HWND,
+    pub(crate) primary: HWND,
+    pub(crate) secondary: HWND,
+    pub(crate) close: HWND,
+    pub(crate) hot: isize,
+    pub(crate) page: Page,
+    pub(crate) options: InstallOptions,
+    pub(crate) detection: Receiver<DriverStatus>,
+    pub(crate) driver_text: String,
+    pub(crate) work: Option<(PathBuf, Receiver<Result<(), String>>)>,
+    pub(crate) result: Option<InstallResult>,
+    pub(crate) percent: u32,
+    pub(crate) message: String,
+    pub(crate) cancelling: bool,
 }
 impl Drop for State {
     fn drop(&mut self) {
@@ -100,88 +105,36 @@ unsafe fn button(hwnd: HWND, id: isize, r: RECT, text: &str, font: HFONT) -> HWN
         text,
     );
     SetWindowLongPtrW(b, GWL_STYLE, (GetWindowLongPtrW(b, GWL_STYLE) & !15) | 11); // BS_OWNERDRAW
+    winutil::suppress_button_erase(b);
     ui::apply_font(b, font);
     b
 }
-unsafe fn layout_controls(s: &State, dpi: u32) {
-    let r = rect(dpi, 48, 166, 340, 24);
-    let _ = SetWindowPos(
-        s.path,
-        None,
-        r.left,
-        r.top,
-        r.right - r.left,
-        r.bottom - r.top,
-        SWP_NOZORDER | SWP_NOACTIVATE,
-    );
-    let r = rect(dpi, 410, 156, 102, 42);
-    let _ = SetWindowPos(
-        s.browse,
-        None,
-        r.left,
-        r.top,
-        r.right - r.left,
-        r.bottom - r.top,
-        SWP_NOZORDER | SWP_NOACTIVATE,
-    );
-    let _ = SetWindowPos(
-        s.desktop,
-        None,
-        scale(40, dpi),
-        scale(278, dpi),
-        scale(220, dpi),
-        scale(28, dpi),
-        SWP_NOZORDER | SWP_NOACTIVATE,
-    );
-    let _ = SetWindowPos(
-        s.menu,
-        None,
-        scale(284, dpi),
-        scale(278, dpi),
-        scale(228, dpi),
-        scale(28, dpi),
-        SWP_NOZORDER | SWP_NOACTIVATE,
-    );
-    let _ = SetWindowPos(
-        s.launch,
-        None,
-        scale(40, dpi),
-        scale(314, dpi),
-        scale(460, dpi),
-        scale(28, dpi),
-        SWP_NOZORDER | SWP_NOACTIVATE,
-    );
-    let r = rect(dpi, 356, 544, 180, 40);
-    let _ = SetWindowPos(
-        s.primary,
-        None,
-        r.left,
-        r.top,
-        r.right - r.left,
-        r.bottom - r.top,
-        SWP_NOZORDER | SWP_NOACTIVATE,
-    );
-    let r = rect(dpi, 244, 544, 96, 40);
-    let _ = SetWindowPos(
-        s.secondary,
-        None,
-        r.left,
-        r.top,
-        r.right - r.left,
-        r.bottom - r.top,
-        SWP_NOZORDER | SWP_NOACTIVATE,
-    );
-    let r = rect(dpi, 508, 16, 28, 28);
-    let _ = SetWindowPos(
-        s.close,
-        None,
-        r.left,
-        r.top,
-        r.right - r.left,
-        r.bottom - r.top,
-        SWP_NOZORDER | SWP_NOACTIVATE,
-    );
+pub(crate) unsafe fn layout_controls(s: &State, dpi: u32) {
+    for (child, r) in [
+        (s.path, rect(dpi, 42, 274, 394, 24)),
+        (s.browse, rect(dpi, 454, 266, 76, 40)),
+        (s.desktop, rect(dpi, 30, 362, 500, 48)),
+        (s.menu, rect(dpi, 30, 414, 500, 48)),
+        (s.launch, rect(dpi, 30, 466, 500, 48)),
+        (s.primary, rect(dpi, 350, 672, 180, 40)),
+        (s.secondary, rect(dpi, 244, 672, 96, 40)),
+        (s.close, rect(dpi, 516, 10, 28, 28)),
+    ] {
+        let _ = SetWindowPos(
+            child,
+            None,
+            r.left,
+            r.top,
+            r.right - r.left,
+            r.bottom - r.top,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+    for c in [s.desktop, s.menu, s.launch] {
+        ui::theme_checkbox(c, s.is_dark, dpi);
+    }
 }
+
 unsafe fn invalidate_button(hwnd: HWND, s: &State, id: isize) {
     let btn = match id {
         PRIMARY => s.primary,
@@ -201,8 +154,8 @@ unsafe fn invalidate_button(hwnd: HWND, s: &State, id: isize) {
 unsafe fn init(hwnd: HWND) -> State {
     let dpi = window_dpi(hwnd);
     let font = create_font(14, dpi, false);
-    let small = create_font(12, dpi, false);
-    let title = create_font(24, dpi, true);
+    let small = create_font(UI_CAPTION_SIZE, dpi, false);
+    let title = create_font(28, dpi, true);
     let mut options = InstallOptions::default();
     if let Ok(pf) = knownfolder::program_files() {
         options.install_dir = pf.join("drcom4scutGUI");
@@ -274,15 +227,22 @@ unsafe fn init(hwnd: HWND) -> State {
     std::thread::spawn(move || {
         let _ = tx.send(driver::detect_with(&driver::RealDriverHost));
     });
+    let is_dark = winutil::is_system_dark_mode();
+    for c in [desktop, menu, launch] {
+        ui::theme_checkbox(c, is_dark, dpi);
+    }
+    let palette = winutil::Palette::for_dark(is_dark);
     SetTimer(Some(hwnd), 1, 150, None);
     ui::round_corners(hwnd);
+    winutil::set_window_dark_mode(hwnd, is_dark);
     let state = State {
+        is_dark,
         dpi,
         font,
         small,
         title,
-        card: solid_brush(COLOR_CARD),
-        field: solid_brush(COLOR_CONTROL),
+        card: solid_brush(palette.card),
+        field: solid_brush(palette.control),
         controls: vec![path, browse, desktop, menu, launch],
         path,
         browse,
@@ -322,97 +282,123 @@ unsafe fn text(
     DrawTextW(hdc, &mut value, &mut r, flags | DT_NOPREFIX);
     SelectObject(hdc, old);
 }
-unsafe fn paint(hwnd: HWND, s: &State) {
-    let mut ps = PAINTSTRUCT::default();
-    let dc = BeginPaint(hwnd, &mut ps);
-    let mut bounds = RECT::default();
-    let _ = GetClientRect(hwnd, &mut bounds);
+pub(crate) unsafe fn paint_to_dc(dc: HDC, bounds: RECT, s: &State) {
     let mem = CreateCompatibleDC(Some(dc));
     let bmp = CreateCompatibleBitmap(dc, bounds.right, bounds.bottom);
     let old = SelectObject(mem, HGDIOBJ(bmp.0));
-    ui::fill_page(mem, hwnd);
-    fill_component(mem, bounds, s.dpi, COLOR_PAGE, Some(COLOR_WINDOW_BORDER));
+    let palette = winutil::Palette::for_dark(s.is_dark);
+    let bg = solid_brush(palette.page);
+    let _ = FillRect(mem, &bounds, bg);
+    delete_gdi(brush_as_gdi(bg));
     let r = |x, y, w, h| rect(s.dpi, x, y, w, h);
+    hero::line(mem, r(0, 47, 560, 1), palette.stroke);
+    hero::logo(mem, r(16, 11, 26, 26));
     text(
         mem,
-        s.title,
-        r(24, 28, 464, 36),
-        "安装校园网客户端",
-        COLOR_TEXT_PRIMARY,
-        DT_SINGLELINE | DT_END_ELLIPSIS,
+        s.small,
+        r(46, 0, 420, 48),
+        "drcom4scut 安装程序",
+        palette.text_primary,
+        DT_SINGLELINE | DT_VCENTER,
+    );
+    hero::surface(
+        mem,
+        r(30, 78, 44, 44),
+        s.dpi,
+        hero::soft(palette, palette.accent),
+        14,
+    );
+    hero::icon(
+        mem,
+        r(41, 89, 22, 22),
+        palette.accent,
+        if s.page == Page::Finished {
+            Icon::Info
+        } else {
+            Icon::Download
+        },
     );
     text(
         mem,
         s.small,
-        r(24, 74, 512, 24),
-        &format!("Windows x64  ·  版本 {}", env!("CARGO_PKG_VERSION")),
-        COLOR_TEXT_SECONDARY,
-        DT_SINGLELINE | DT_END_ELLIPSIS,
+        r(320, 84, 210, 28),
+        &format!("Windows x64 · {}", env!("CARGO_PKG_VERSION")),
+        palette.text_secondary,
+        DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
     );
     if s.page == Page::Configure {
-        fill_component(mem, r(24, 112, 512, 112), s.dpi, COLOR_CARD, None);
         text(
             mem,
-            s.font,
-            r(40, 126, 472, 24),
-            "安装位置",
-            COLOR_TEXT_PRIMARY,
-            DT_SINGLELINE | DT_END_ELLIPSIS,
-        );
-        fill_component(
-            mem,
-            r(40, 156, 356, 42),
-            s.dpi,
-            COLOR_CONTROL,
-            Some(COLOR_STROKE),
-        );
-        fill_component(mem, r(24, 236, 512, 122), s.dpi, COLOR_CARD, None);
-        text(
-            mem,
-            s.font,
-            r(40, 250, 472, 24),
-            "快捷方式与启动",
-            COLOR_TEXT_PRIMARY,
-            DT_SINGLELINE | DT_END_ELLIPSIS,
-        );
-        fill_component(mem, r(24, 370, 512, 116), s.dpi, COLOR_CARD, None);
-        text(
-            mem,
-            s.font,
-            r(40, 386, 472, 24),
-            "网络驱动 · 自动配置",
-            COLOR_TEXT_PRIMARY,
+            s.title,
+            r(30, 144, 500, 40),
+            "安装校园网客户端",
+            palette.text_primary,
             DT_SINGLELINE | DT_END_ELLIPSIS,
         );
         text(
             mem,
             s.small,
-            r(40, 420, 472, 50),
+            r(30, 190, 500, 24),
+            "完成以下设置，即可开始使用。",
+            palette.text_secondary,
+            DT_SINGLELINE,
+        );
+        text(
+            mem,
+            s.font,
+            r(30, 234, 500, 24),
+            "安装位置",
+            palette.text_primary,
+            DT_SINGLELINE,
+        );
+        hero::field(mem, r(30, 264, 414, 44), s.dpi, palette, false);
+        text(
+            mem,
+            s.font,
+            r(30, 334, 500, 24),
+            "安装选项",
+            palette.text_primary,
+            DT_SINGLELINE,
+        );
+        for y in [412, 464] {
+            hero::line(mem, r(30, y, 500, 1), palette.stroke);
+        }
+        hero::surface(
+            mem,
+            r(30, 530, 500, 66),
+            s.dpi,
+            hero::soft(palette, palette.accent),
+            12,
+        );
+        hero::icon(mem, r(44, 546, 18, 18), palette.accent, Icon::Info);
+        text(
+            mem,
+            s.small,
+            r(72, 540, 442, 46),
             &s.driver_text,
-            COLOR_TEXT_SECONDARY,
+            palette.text_primary,
             DT_WORDBREAK | DT_WORD_ELLIPSIS,
         );
         let note = if s.message.is_empty() {
-            "缺少驱动时将自动下载并打开 Npcap 官方安装窗口。\n请按提示完成许可确认；客户端附带原生卸载程序。"
+            "缺少驱动时将打开 Npcap 官方安装窗口，请按提示完成许可确认。"
         } else {
             &s.message
         };
         text(
             mem,
             s.small,
-            r(24, 494, 512, 46),
+            r(30, 606, 500, 42),
             note,
             if s.message.is_empty() {
-                COLOR_TEXT_SECONDARY
+                palette.text_secondary
             } else {
-                COLOR_DANGER
+                palette.danger_text
             },
             DT_WORDBREAK | DT_WORD_ELLIPSIS,
         );
     } else {
-        fill_component(mem, r(24, 112, 512, 374), s.dpi, COLOR_CARD, None);
         let heading = if s.page == Page::Running {
-            "正在安装"
+            "正在准备客户端"
         } else if let Some(result) = &s.result {
             if !result.ok {
                 "安装未完成"
@@ -429,37 +415,54 @@ unsafe fn paint(hwnd: HWND, s: &State) {
         text(
             mem,
             s.title,
-            r(40, 140, 472, 40),
+            r(30, 144, 500, 42),
             heading,
-            COLOR_TEXT_PRIMARY,
+            palette.text_primary,
             DT_SINGLELINE | DT_END_ELLIPSIS,
         );
         text(
             mem,
             s.font,
-            r(40, 198, 472, 132),
+            r(30, 206, 500, 144),
             &s.message,
-            COLOR_TEXT_SECONDARY,
+            palette.text_secondary,
             DT_WORDBREAK | DT_WORD_ELLIPSIS,
+        );
+        hero::surface(mem, r(30, 382, 500, 8), s.dpi, palette.toggle_off, 4);
+        if s.percent > 0 {
+            hero::surface(
+                mem,
+                r(30, 382, (500 * s.percent.min(100) / 100) as i32, 8),
+                s.dpi,
+                palette.accent,
+                4,
+            );
+        }
+        text(
+            mem,
+            s.small,
+            r(30, 402, 500, 24),
+            "安装进度",
+            palette.text_secondary,
+            DT_SINGLELINE,
         );
         text(
             mem,
             s.small,
-            r(40, 350, 472, 70),
+            r(430, 402, 100, 24),
+            &format!("{}%", s.percent),
+            palette.text_secondary,
+            DT_SINGLELINE | DT_RIGHT,
+        );
+        hero::surface(mem, r(30, 452, 500, 80), s.dpi, palette.card, 24);
+        text(
+            mem,
+            s.small,
+            r(46, 466, 468, 56),
             &format!("安装位置\n{}", s.options.install_dir.display()),
-            COLOR_TEXT_SECONDARY,
+            palette.text_secondary,
             DT_WORDBREAK | DT_WORD_ELLIPSIS,
         );
-        fill_component(mem, r(40, 442, 472, 8), s.dpi, COLOR_STROKE, None);
-        if s.percent > 0 {
-            fill_component(
-                mem,
-                r(40, 442, (472 * s.percent.min(100) / 100) as i32, 8),
-                s.dpi,
-                COLOR_ACCENT,
-                None,
-            );
-        }
         let note = if s.page == Page::Running {
             "请保持窗口打开。Npcap 安装时可能需要在官方窗口确认。"
         } else {
@@ -468,12 +471,21 @@ unsafe fn paint(hwnd: HWND, s: &State) {
         text(
             mem,
             s.small,
-            r(24, 502, 512, 36),
+            r(30, 568, 500, 60),
             note,
-            COLOR_TEXT_SECONDARY,
+            palette.text_secondary,
             DT_WORDBREAK | DT_WORD_ELLIPSIS,
         );
     }
+    hero::line(mem, r(0, 656, 560, 1), palette.stroke);
+    text(
+        mem,
+        s.small,
+        r(30, 672, 200, 40),
+        "安装到这台电脑",
+        palette.text_secondary,
+        DT_SINGLELINE | DT_VCENTER,
+    );
     let _ = BitBlt(
         dc,
         0,
@@ -488,6 +500,14 @@ unsafe fn paint(hwnd: HWND, s: &State) {
     SelectObject(mem, old);
     delete_gdi(HGDIOBJ(bmp.0));
     let _ = DeleteDC(mem);
+}
+
+unsafe fn paint(hwnd: HWND, s: &State) {
+    let mut ps = PAINTSTRUCT::default();
+    let dc = BeginPaint(hwnd, &mut ps);
+    let mut bounds = RECT::default();
+    let _ = GetClientRect(hwnd, &mut bounds);
+    paint_to_dc(dc, bounds, s);
     let _ = EndPaint(hwnd, &ps);
 }
 unsafe fn refresh(hwnd: HWND) {
@@ -495,7 +515,7 @@ unsafe fn refresh(hwnd: HWND) {
 }
 /// Shell elevation is required to open the client's requireAdministrator manifest.
 unsafe fn launch_client(owner: HWND, dir: &std::path::Path) -> Result<(), String> {
-    use windows::Win32::UI::Shell::{ShellExecuteExW, SHELLEXECUTEINFOW};
+    use windows::Win32::UI::Shell::{SHELLEXECUTEINFOW, ShellExecuteExW};
     let executable = wide(&dir.join(GUI_EXE_NAME).to_string_lossy());
     let workdir = wide(&dir.to_string_lossy());
     let mut info = SHELLEXECUTEINFOW {
@@ -635,7 +655,7 @@ unsafe fn cancel(hwnd: HWND, s: &mut State) {
 }
 unsafe fn tick(hwnd: HWND, s: &mut State) {
     let mut needs_refresh = false;
-    
+
     if let Ok(status) = s.detection.try_recv() {
         s.driver_text = if status == DriverStatus::Available {
             "已检测到兼容的 x64 驱动，安装时将直接使用。"
@@ -645,20 +665,20 @@ unsafe fn tick(hwnd: HWND, s: &mut State) {
         .into();
         needs_refresh = true;
     }
-    
+
     let Some((dir, rx)) = &s.work else {
         if needs_refresh {
             refresh(hwnd);
         }
         return;
     };
-    
+
     if !s.cancelling {
         if let Ok(raw) = std::fs::read(dir.join("status.json")) {
             if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&raw) {
                 let new_percent = v["percent"].as_u64().unwrap_or(0).min(100) as u32;
                 let new_message = v["message"].as_str().map(String::from);
-                
+
                 // 只在有变化时刷新
                 if new_percent != s.percent || new_message.as_ref() != Some(&s.message) {
                     s.percent = new_percent;
@@ -670,7 +690,7 @@ unsafe fn tick(hwnd: HWND, s: &mut State) {
             }
         }
     }
-    
+
     let completed = match rx.try_recv() {
         Ok(r) => Some(r),
         Err(mpsc::TryRecvError::Disconnected) => {
@@ -678,7 +698,7 @@ unsafe fn tick(hwnd: HWND, s: &mut State) {
         }
         Err(_) => None,
     };
-    
+
     if let Some(completed) = completed {
         let result = completed
             .and_then(|_| {
@@ -698,7 +718,12 @@ unsafe fn tick(hwnd: HWND, s: &mut State) {
         refresh(hwnd);
     }
 }
-unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+pub(crate) unsafe extern "system" fn wndproc(
+    hwnd: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+) -> LRESULT {
     if msg == WM_CREATE {
         let s = Box::new(init(hwnd));
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(s) as isize);
@@ -721,74 +746,88 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         }
         WM_CTLCOLORSTATIC | WM_CTLCOLORBTN | WM_CTLCOLOREDIT => {
             let dc = HDC(wp.0 as *mut _);
-            SetTextColor(dc, COLOR_TEXT_PRIMARY);
+            let palette = winutil::Palette::for_dark(s.is_dark);
+            SetTextColor(dc, palette.text_primary);
             SetBkMode(dc, TRANSPARENT);
             let brush = if msg == WM_CTLCOLOREDIT {
-                SetBkColor(dc, COLOR_CONTROL);
+                SetBkColor(dc, palette.control);
                 s.field
             } else {
-                SetBkColor(dc, COLOR_CARD);
+                SetBkColor(dc, palette.card);
                 s.card
             };
             LRESULT(brush.0 as isize)
         }
         WM_DRAWITEM => {
             let d = &*(lp.0 as *const DRAWITEMSTRUCT);
-            // Owner-drawn controls must clear their corners as well as the rounded body.
-            let background = solid_brush(if d.CtlID == ui::ID_BROWSE as u32 {
-                COLOR_CARD
-            } else {
-                COLOR_PAGE
-            });
-            let _ = FillRect(d.hDC, &d.rcItem, background);
-            delete_gdi(brush_as_gdi(background));
-            let accent = d.CtlID == PRIMARY as u32;
-            let hot = s.hot == d.CtlID as isize;
-            let fill = if accent {
-                if d.itemState.0 & ODS_SELECTED.0 != 0 || hot {
-                    COLOR_ACCENT_HOVER
+            winutil::paint_buffered(d.hDC, d.rcItem, |dc| {
+                let palette = winutil::Palette::for_dark(s.is_dark);
+                // Owner-drawn controls must clear their corners as well as the rounded body.
+                let background = solid_brush(palette.page);
+                let _ = FillRect(dc, &d.rcItem, background);
+                delete_gdi(brush_as_gdi(background));
+                let accent = d.CtlID == PRIMARY as u32;
+                let hot = s.hot == d.CtlID as isize;
+                let disabled =
+                    !windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(d.hwndItem)
+                        .as_bool();
+                let fill = if disabled {
+                    palette.disabled_bg
+                } else if accent {
+                    if d.itemState.0 & ODS_SELECTED.0 != 0 {
+                        palette.accent_active
+                    } else if hot {
+                        palette.accent_hover
+                    } else {
+                        palette.accent
+                    }
+                } else if d.CtlID == CLOSE as u32 {
+                    if hot { palette.danger } else { palette.page }
                 } else {
-                    COLOR_ACCENT
-                }
-            } else {
-                COLOR_PAGE
-            };
-            fill_component(
-                d.hDC,
-                d.rcItem,
-                s.dpi,
-                fill,
-                if accent {
-                    None
-                } else if hot {
-                    Some(COLOR_STROKE_HOVER)
-                } else {
-                    Some(COLOR_STROKE)
-                },
-            );
-            text(
-                d.hDC,
-                s.font,
-                d.rcItem,
-                &ui::edit_text(d.hwndItem),
-                if accent {
-                    COLOR_CARD
-                } else {
-                    COLOR_TEXT_PRIMARY
-                },
-                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-            );
-            if d.itemState.0 & ODS_FOCUS.0 != 0 {
-                let mut r = d.rcItem;
-                let _ = InflateRect(&mut r, -scale(3, s.dpi), -scale(3, s.dpi));
+                    if d.itemState.0 & ODS_SELECTED.0 != 0 || hot {
+                        if s.is_dark {
+                            palette.stroke_hover
+                        } else {
+                            palette.stroke
+                        }
+                    } else {
+                        if d.CtlID == ui::ID_BROWSE as u32 {
+                            palette.control
+                        } else {
+                            palette.card
+                        }
+                    }
+                };
                 fill_round(
-                    d.hDC,
-                    r,
-                    component_radius(r.bottom - r.top, s.dpi),
+                    dc,
+                    d.rcItem,
+                    scale(24, s.dpi),
                     fill,
-                    Some(COLOR_ACCENT),
+                    if accent {
+                        None
+                    } else if d.CtlID == CLOSE as u32 {
+                        None
+                    } else if hot {
+                        Some(palette.stroke_hover)
+                    } else {
+                        Some(palette.stroke)
+                    },
                 );
-            }
+                text(
+                    dc,
+                    s.font,
+                    d.rcItem,
+                    &ui::edit_text(d.hwndItem),
+                    if disabled {
+                        palette.text_secondary
+                    } else if accent || (d.CtlID == CLOSE as u32 && hot) {
+                        COLORREF(0x00FFFFFF)
+                    } else {
+                        palette.text_primary
+                    },
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                );
+            });
             LRESULT(1)
         }
         WM_COMMAND => {
@@ -846,6 +885,23 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             LRESULT(0)
         }
+        WM_SETTINGCHANGE => {
+            let is_dark = winutil::is_system_dark_mode();
+            if is_dark != s.is_dark {
+                s.is_dark = is_dark;
+                let palette = winutil::Palette::for_dark(is_dark);
+                delete_gdi(brush_as_gdi(s.card));
+                delete_gdi(brush_as_gdi(s.field));
+                s.card = solid_brush(palette.card);
+                s.field = solid_brush(palette.control);
+                winutil::set_window_dark_mode(hwnd, is_dark);
+                for c in [s.desktop, s.menu, s.launch] {
+                    ui::theme_checkbox(c, is_dark, s.dpi);
+                }
+                refresh(hwnd);
+            }
+            LRESULT(0)
+        }
         WM_DPICHANGED => {
             if lp.0 != 0 {
                 let suggested = &*(lp.0 as *const RECT);
@@ -861,8 +917,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 let new_dpi = (wp.0 & 0xffff) as u32;
                 s.dpi = new_dpi;
                 let new_font = create_font(14, new_dpi, false);
-                let new_small = create_font(12, new_dpi, false);
-                let new_title = create_font(24, new_dpi, true);
+                let new_small = create_font(UI_CAPTION_SIZE, new_dpi, false);
+                let new_title = create_font(28, new_dpi, true);
                 for child in [
                     s.path,
                     s.browse,
@@ -973,7 +1029,7 @@ pub fn run() {
             w!("DrcomSetup"),
             "校园网客户端安装",
             560,
-            608,
+            720,
             Some(wndproc),
         ) {
             let mut msg = MSG::default();
