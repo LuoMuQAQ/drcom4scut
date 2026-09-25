@@ -41,7 +41,12 @@ use super::layout;
 mod animation_render_tests;
 #[path = "display.rs"]
 mod display;
+use super::protocol::{
+    self, FrontendCommand, HostEvent, InitSnapshotPayload, MainSnapshot, SafeSettingsSnapshot,
+    StatusInfo, ThemeConfig,
+};
 use super::tray::{HIconOrFile, Tray};
+use super::webview::{self, RuntimeStatus, WebView};
 use super::winutil::{
     self, brush_as_gdi, create_font, delete_gdi, destroy_icon, font_as_gdi, solid_brush, wide,
     COLOR_ACCENT, COLOR_CARD, COLOR_DANGER, COLOR_PAGE, COLOR_TEXT_PRIMARY, COLOR_TEXT_SECONDARY,
@@ -143,6 +148,8 @@ struct App {
     preview_dpi: Option<u32>,
     layout_pending: bool,
     layout_in_progress: bool,
+    pub webview: Option<WebView>,
+    pub theme_config: ThemeConfig,
 }
 
 impl App {
@@ -218,12 +225,15 @@ impl App {
             preview_dpi,
             layout_pending: false,
             layout_in_progress: false,
+            webview: None,
+            theme_config: ThemeConfig::load_for_current_user(),
         }
     }
 }
 
 impl Drop for App {
     fn drop(&mut self) {
+        self.webview.take();
         self.core.take();
         self.tray.take();
         if !self.hwnd_popup.0.is_null() {
@@ -416,6 +426,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         windows::Win32::UI::WindowsAndMessaging::WM_SIZE => {
+            if let Some(app) = app_mut(hwnd) {
+                if let Some(wv) = &app.webview {
+                    let mut rc = RECT::default();
+                    let _ = GetClientRect(hwnd, &mut rc);
+                    wv.resize(rc);
+                }
+            }
             if wparam.0 != windows::Win32::UI::WindowsAndMessaging::SIZE_MINIMIZED as usize {
                 display::schedule(hwnd);
             }
@@ -607,6 +624,29 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let _ = ShowWindow(hwnd, SW_RESTORE);
             let _ = ShowWindow(hwnd, SW_SHOW);
             let _ = SetForegroundWindow(hwnd);
+            if let Some(app) = app_mut(hwnd) {
+                if app.webview.is_none() && !app.preview {
+                    if matches!(webview::detect_runtime(), RuntimeStatus::Missing) {
+                        let ask = wide("系统中未检测到 Microsoft Edge WebView2 运行时。\n\n主窗口目前以基础模式运行。建议安装 WebView2 运行时以获得最佳界面体验。\n\n是否打开微软官方下载页面？");
+                        let r = MessageBoxW(
+                            Some(hwnd),
+                            PCWSTR(ask.as_ptr()),
+                            w!("校园网认证客户端"),
+                            windows::Win32::UI::WindowsAndMessaging::MB_YESNO | windows::Win32::UI::WindowsAndMessaging::MB_ICONINFORMATION,
+                        );
+                        if r == windows::Win32::UI::WindowsAndMessaging::IDYES {
+                            let _ = windows::Win32::UI::Shell::ShellExecuteW(
+                                None,
+                                w!("open"),
+                                w!("https://developer.microsoft.com/zh-cn/microsoft-edge/webview2/"),
+                                None,
+                                None,
+                                SW_SHOW,
+                            );
+                        }
+                    }
+                }
+            }
             LRESULT(0)
         }
         WM_APP_CONNECT => {
@@ -1547,6 +1587,212 @@ unsafe fn initialize(hwnd: HWND) {
         refresh_tray(app);
         invalidate(hwnd);
     }
+    setup_webview(hwnd, app);
+}
+
+unsafe fn setup_webview(hwnd: HWND, app: &mut App) {
+    if app.preview {
+        return;
+    }
+    match webview::detect_runtime() {
+        RuntimeStatus::Installed { .. } => {
+            const HTML_CONTENT: &str = include_str!("../../frontend/dist/index.html");
+            let hwnd_addr = hwnd.0 as usize;
+            match WebView::create(hwnd, HTML_CONTENT, move |json_msg| {
+                let hwnd = HWND(hwnd_addr as *mut _);
+                handle_frontend_command(hwnd, json_msg);
+            }) {
+                Ok(wv) => {
+                    let _ = ShowWindow(app.hwnd_user, SW_HIDE);
+                    let _ = ShowWindow(app.hwnd_pass, SW_HIDE);
+                    let _ = ShowWindow(app.hwnd_eye, SW_HIDE);
+                    app.webview = Some(wv);
+                }
+                Err(_) => {
+                    app.webview = None;
+                }
+            }
+        }
+        RuntimeStatus::Missing => {
+            app.webview = None;
+        }
+    }
+}
+
+unsafe fn handle_frontend_command(hwnd: HWND, json_msg: &str) {
+    let Ok(cmd) = protocol::parse_command(json_msg) else {
+        return;
+    };
+    let Some(app) = app_mut(hwnd) else {
+        return;
+    };
+
+    match cmd {
+        FrontendCommand::Init { .. } => {
+            send_webview_snapshot(app);
+        }
+        FrontendCommand::SetTheme { mode } => {
+            app.theme_config.mode = mode.clone();
+            let _ = app.theme_config.save_for_current_user();
+            let actual = app.theme_config.resolve_actual();
+            let event = HostEvent::ThemeChanged { mode, actual };
+            if let Some(wv) = &app.webview {
+                let _ = wv.post_message(&serde_json::to_string(&event).unwrap());
+            }
+        }
+        FrontendCommand::WindowAction { action } => match action.as_str() {
+            "minimize" => {
+                let _ = ShowWindow(hwnd, SW_MINIMIZE);
+            }
+            "close" => {
+                request_close(hwnd);
+            }
+            _ => {}
+        },
+        FrontendCommand::Connect => {
+            on_action(hwnd);
+        }
+        FrontendCommand::Disconnect => {
+            start_disconnect(hwnd);
+        }
+        FrontendCommand::UpdateSettings {
+            username,
+            password,
+            auto_connect,
+            remember_password,
+            startup,
+            tray_keep,
+        } => {
+            if let Some(u) = username {
+                app.settings.username = u;
+                let user_w = wide(&app.settings.username);
+                let _ = SetWindowTextW(app.hwnd_user, PCWSTR(user_w.as_ptr()));
+            }
+            if let Some(p) = password {
+                app.settings.password = p;
+                let pass_w = wide(&app.settings.password);
+                let _ = SetWindowTextW(app.hwnd_pass, PCWSTR(pass_w.as_ptr()));
+            }
+            if let Some(ac) = auto_connect {
+                app.settings.auto_login = ac;
+            }
+            if let Some(rp) = remember_password {
+                app.settings.remember_password = rp;
+            }
+            if let Some(st) = startup {
+                app.settings.start_with_windows = st;
+                if let Ok(exe) = std::env::current_exe() {
+                    let _ = apply_startup(st, &exe);
+                }
+            }
+            if let Some(tk) = tray_keep {
+                app.settings.minimize_to_tray = tk;
+            }
+            let _ = settings::save(&app.settings);
+        }
+        FrontendCommand::SelectAdapter { id } => {
+            if let Some(pos) = app.adapters.iter().position(|a| a.id == id) {
+                app.combo_sel = (pos + 1) as i32;
+                app.settings.adapter_id = id;
+                let _ = settings::save(&app.settings);
+            }
+        }
+        _ => {}
+    }
+}
+
+unsafe fn send_webview_snapshot(app: &App) {
+    let Some(wv) = &app.webview else {
+        return;
+    };
+    let actual_theme = app.theme_config.resolve_actual();
+    let selected_id = if app.combo_sel > 0 {
+        app.adapters.get((app.combo_sel as usize) - 1).map(|a| a.id.clone())
+    } else {
+        None
+    };
+
+    let adapters_info: Vec<protocol::AdapterInfo> = app
+        .adapters
+        .iter()
+        .map(|a| protocol::AdapterInfo {
+            id: a.id.clone(),
+            name: a.name.clone(),
+            description: a.mac.clone(),
+            mac: a.mac.clone(),
+            is_up: a.is_up,
+            has_gateway: a.has_ipv4_gateway,
+        })
+        .collect();
+
+    let (state_str, indicator_str) = match app.link_state {
+        LinkState::Online => ("connected", "success"),
+        LinkState::Connecting => ("connecting", "progress"),
+        LinkState::Waiting | LinkState::Offline => {
+            if app.starting {
+                ("connecting", "progress")
+            } else {
+                ("idle", "idle")
+            }
+        }
+        LinkState::Error => ("error", "danger"),
+        LinkState::Degraded => ("degraded", "warning"),
+    };
+
+    let snapshot = InitSnapshotPayload {
+        protocol_version: protocol::PROTOCOL_VERSION,
+        window_type: "main".into(),
+        theme_mode: app.theme_config.mode.clone(),
+        actual_theme,
+        main: Some(MainSnapshot {
+            settings: SafeSettingsSnapshot {
+                username: app.settings.username.clone(),
+                has_password: !app.settings.password.is_empty(),
+                auto_connect: app.settings.auto_login,
+                remember_password: app.settings.remember_password,
+                startup: app.settings.start_with_windows,
+                tray_keep: app.settings.minimize_to_tray,
+            },
+            adapters: adapters_info,
+            selected_adapter_id: selected_id,
+            status: StatusInfo {
+                state: state_str.into(),
+                title: app.status_title.clone(),
+                detail: app.status_detail.clone(),
+                indicator: indicator_str.into(),
+            },
+        }),
+        setup: None,
+        uninstall: None,
+    };
+
+    let event = HostEvent::InitSnapshot(Box::new(snapshot));
+    let _ = wv.post_message(&serde_json::to_string(&event).unwrap());
+}
+
+unsafe fn sync_webview_status(app: &App) {
+    if let Some(wv) = &app.webview {
+        let (state_str, indicator_str) = match app.link_state {
+            LinkState::Online => ("connected", "success"),
+            LinkState::Connecting => ("connecting", "progress"),
+            LinkState::Waiting | LinkState::Offline => {
+                if app.starting {
+                    ("connecting", "progress")
+                } else {
+                    ("idle", "idle")
+                }
+            }
+            LinkState::Error => ("error", "danger"),
+            LinkState::Degraded => ("degraded", "warning"),
+        };
+        let event = HostEvent::StatusChanged {
+            state: state_str.into(),
+            title: app.status_title.clone(),
+            detail: app.status_detail.clone(),
+            indicator: indicator_str.into(),
+        };
+        let _ = wv.post_message(&serde_json::to_string(&event).unwrap());
+    }
 }
 
 unsafe fn fill_controls(app: &mut App) {
@@ -1871,6 +2117,7 @@ unsafe fn apply_status(hwnd: HWND, state: LinkState, title: &str, detail: &str) 
     app.status_title = title.to_string();
     app.status_detail = detail.to_string();
     refresh_tray(app);
+    sync_webview_status(app);
     invalidate(hwnd);
 }
 
