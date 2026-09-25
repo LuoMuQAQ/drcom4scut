@@ -19,7 +19,12 @@ path = "src/bin/setup.rs"
 name = "uninstall"
 path = "src/bin/uninstall.rs"
 
+[[bin]]
+name = "heroui-preview"
+path = "src/bin/heroui_preview.rs"
+
 [dependencies]
+windows-core = "0.61"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",

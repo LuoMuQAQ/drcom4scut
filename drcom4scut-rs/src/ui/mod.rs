@@ -5,5 +5,6 @@ pub mod gdiplus;
 mod layout;
 mod textfield;
 pub mod tray;
+pub mod webview;
 pub mod window;
 pub mod winutil;

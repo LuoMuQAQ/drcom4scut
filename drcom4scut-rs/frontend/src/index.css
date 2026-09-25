@@ -1,0 +1,25 @@
+@import "@heroui/styles";
+
+/* 禁止选中和系统右键菜单（除非明确允许） */
+* {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
+  box-sizing: border-box;
+}
+
+input, textarea {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* 标题栏拖拽区域 */
+.titlebar-drag-region {
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+.no-drag {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}

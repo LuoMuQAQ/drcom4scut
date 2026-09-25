@@ -12,6 +12,7 @@ Packet.lib
 .vscode
 
 # Windows GUI generated artifacts and private runtime data
+**/node_modules/
 **/target/
 **/release/
 **/logs/
