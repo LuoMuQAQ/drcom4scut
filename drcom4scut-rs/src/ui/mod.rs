@@ -3,6 +3,7 @@
 mod anim;
 pub mod gdiplus;
 mod layout;
+pub mod protocol;
 mod textfield;
 pub mod tray;
 pub mod webview;
