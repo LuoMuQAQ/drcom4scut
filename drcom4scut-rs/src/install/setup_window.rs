@@ -968,6 +968,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     }
 }
 pub fn run() {
+    drcom4scut_gui::install::setup_webview::run_webview_setup();
+}
+
+pub fn run_legacy() {
     unsafe {
         if let Some(hwnd) = ui::create_popup(
             w!("DrcomSetup"),

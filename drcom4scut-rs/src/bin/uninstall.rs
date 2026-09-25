@@ -25,13 +25,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     TrackMouseEvent, TRACKMOUSEEVENT, TRACKMOUSEEVENT_FLAGS,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    ChildWindowFromPoint, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos,
+    ChildWindowFromPoint, CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos,
     GetWindowLongPtrW, GetWindowLongPtrW as GetStyle, GetWindowRect, IsWindowVisible,
-    PostQuitMessage, SendMessageW, SetWindowLongPtrW, SetWindowLongPtrW as SetStyle,
-    SetWindowPos, GWLP_USERDATA, GWL_STYLE, HTCAPTION, SWP_NOACTIVATE, SWP_NOZORDER,
-    WM_CLOSE, WM_COMMAND, WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED,
-    WM_DRAWITEM, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCLBUTTONDOWN, WM_PAINT,
-    WM_SETCURSOR,
+    PostQuitMessage, RegisterClassW, SendMessageW, SetWindowLongPtrW, SetWindowLongPtrW as SetStyle,
+    SetWindowPos, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, GWL_STYLE, HTCAPTION, SWP_NOACTIVATE,
+    SWP_NOZORDER, WNDCLASSW, WS_CLIPCHILDREN, WS_POPUP, WS_SYSMENU, WM_CLOSE, WM_COMMAND,
+    WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND,
+    WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCLBUTTONDOWN, WM_PAINT, WM_SETCURSOR, WM_SIZE,
 };
 
 const CLOSE: isize = 3003;
@@ -681,6 +681,11 @@ fn main() {
     }
 }
 
+use drcom4scut_gui::ui::protocol::{
+    self, FrontendCommand, HostEvent, InitSnapshotPayload, ThemeConfig, UninstallSnapshot,
+};
+use drcom4scut_gui::ui::webview::{self, RuntimeStatus, WebView};
+
 fn run_elevated_ui() {
     if quiet_mode() {
         if let Err(e) = launch_cleanup() {
@@ -688,6 +693,19 @@ fn run_elevated_ui() {
         }
         return;
     }
+
+    // 优先尝试基于 HeroUI v3 + WebView2 的现代化卸载界面
+    if matches!(webview::detect_runtime(), RuntimeStatus::Installed { .. }) {
+        if run_webview_uninstall().is_ok() {
+            return;
+        }
+    }
+
+    // 若无 Runtime 或 WebView 初始化失败，自动 100% 回退至原生 Win32 卸载界面
+    run_native_fallback_ui();
+}
+
+fn run_native_fallback_ui() {
     let hwnd = match ui::create_popup(
         w!("DrcomUninstall"),
         "卸载校园网认证客户端",
@@ -703,6 +721,185 @@ fn run_elevated_ui() {
     };
     let _ = hwnd;
     ui::run_message_loop(hwnd);
+}
+
+fn run_webview_uninstall() -> Result<(), ()> {
+    const HTML_CONTENT: &str = include_str!("../../frontend/dist/index.html");
+
+    let self_exe = std::env::current_exe().map_err(|_| ())?;
+    let plan = drcom4scut_gui::install::flow::plan_uninstall(&self_exe).map_err(|_| ())?;
+    let install_dir_str = plan.install_dir.to_string_lossy().to_string();
+
+    let theme_config = std::sync::Arc::new(std::sync::Mutex::new(ThemeConfig::load_for_current_user()));
+
+    let hinstance = unsafe { windows::Win32::System::LibraryLoader::GetModuleHandleW(None).map_err(|_| ())? };
+    let class_name = w!("DrcomUninstallWebViewWnd");
+
+    let wc = WNDCLASSW {
+        lpfnWndProc: Some(uninstall_wv_wndproc),
+        hInstance: hinstance.into(),
+        lpszClassName: class_name,
+        style: CS_HREDRAW | CS_VREDRAW,
+        ..Default::default()
+    };
+    unsafe {
+        let _ = RegisterClassW(&wc);
+    }
+
+    let hwnd = unsafe {
+        CreateWindowExW(
+            windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE(0),
+            class_name,
+            w!("卸载校园网认证客户端"),
+            WS_POPUP | WS_SYSMENU | WS_CLIPCHILDREN,
+            150,
+            150,
+            WIDTH,
+            HEIGHT + 20,
+            None,
+            None,
+            Some(hinstance.into()),
+            None,
+        )
+        .map_err(|_| ())?
+    };
+
+    // 居中
+    unsafe {
+        use drcom4scut_gui::ui::winutil::work_area;
+        let wa = work_area();
+        let x = wa.left + (wa.right - wa.left - WIDTH).max(0) / 2;
+        let y = wa.top + (wa.bottom - wa.top - HEIGHT).max(0) / 2;
+        let _ = SetWindowPos(hwnd, None, x, y, WIDTH, HEIGHT + 20, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+
+    let webview_arc = std::sync::Arc::new(std::sync::Mutex::new(None::<WebView>));
+    let webview_clone = webview_arc.clone();
+    let theme_clone = theme_config.clone();
+    let install_dir_clone = install_dir_str.clone();
+    let hwnd_addr = hwnd.0 as usize;
+
+    let webview = WebView::create(hwnd, HTML_CONTENT, move |json_msg| {
+        let hwnd = HWND(hwnd_addr as *mut _);
+        let Ok(cmd) = protocol::parse_command(json_msg) else {
+            return;
+        };
+
+        match cmd {
+            FrontendCommand::Init { .. } => {
+                let theme_cfg = theme_clone.lock().unwrap().clone();
+                let actual = theme_cfg.resolve_actual();
+                let snapshot = InitSnapshotPayload {
+                    protocol_version: protocol::PROTOCOL_VERSION,
+                    window_type: "uninstall".into(),
+                    theme_mode: theme_cfg.mode,
+                    actual_theme: actual,
+                    main: None,
+                    setup: None,
+                    uninstall: Some(UninstallSnapshot {
+                        install_dir: install_dir_clone.clone(),
+                        version: env!("CARGO_PKG_VERSION").into(),
+                        is_elevated: true,
+                    }),
+                };
+                let event = HostEvent::InitSnapshot(Box::new(snapshot));
+                if let Ok(guard) = webview_clone.lock() {
+                    if let Some(wv) = guard.as_ref() {
+                        let _ = wv.post_message(&serde_json::to_string(&event).unwrap());
+                    }
+                }
+            }
+            FrontendCommand::SetTheme { mode } => {
+                let mut guard = theme_clone.lock().unwrap();
+                guard.mode = mode.clone();
+                let _ = guard.save_for_current_user();
+                let actual = guard.resolve_actual();
+                let event = HostEvent::ThemeChanged { mode, actual };
+                if let Ok(wv_guard) = webview_clone.lock() {
+                    if let Some(wv) = wv_guard.as_ref() {
+                        let _ = wv.post_message(&serde_json::to_string(&event).unwrap());
+                    }
+                }
+            }
+            FrontendCommand::ConfirmUninstall => {
+                match launch_cleanup() {
+                    Ok(()) => unsafe {
+                        let _ = DestroyWindow(hwnd);
+                    },
+                    Err(e) => {
+                        let event = HostEvent::UninstallFinished {
+                            ok: false,
+                            message: format!("卸载启动失败: {e}"),
+                        };
+                        if let Ok(guard) = webview_clone.lock() {
+                            if let Some(wv) = guard.as_ref() {
+                                let _ = wv.post_message(&serde_json::to_string(&event).unwrap());
+                            }
+                        }
+                    }
+                }
+            }
+            FrontendCommand::CancelUninstall | FrontendCommand::WindowAction { .. } => unsafe {
+                let _ = DestroyWindow(hwnd);
+            },
+            _ => {}
+        }
+    })
+    .map_err(|_| ())?;
+
+    *webview_arc.lock().unwrap() = Some(webview);
+
+    unsafe {
+        SetWindowLongPtrW(
+            hwnd,
+            GWLP_USERDATA,
+            std::sync::Arc::into_raw(webview_arc.clone()) as isize,
+        );
+        let _ = windows::Win32::UI::WindowsAndMessaging::ShowWindow(
+            hwnd,
+            windows::Win32::UI::WindowsAndMessaging::SW_SHOW,
+        );
+
+        let mut msg = windows::Win32::UI::WindowsAndMessaging::MSG::default();
+        while windows::Win32::UI::WindowsAndMessaging::GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            let _ = windows::Win32::UI::WindowsAndMessaging::TranslateMessage(&msg);
+            windows::Win32::UI::WindowsAndMessaging::DispatchMessageW(&msg);
+        }
+    }
+    Ok(())
+}
+
+unsafe extern "system" fn uninstall_wv_wndproc(
+    hwnd: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_SIZE => {
+            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+            if ptr != 0 {
+                let webview_arc = &*(ptr as *const std::sync::Mutex<Option<WebView>>);
+                if let Ok(guard) = webview_arc.lock() {
+                    if let Some(wv) = guard.as_ref() {
+                        let mut rc = RECT::default();
+                        let _ = GetClientRect(hwnd, &mut rc);
+                        wv.resize(rc);
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+        WM_CLOSE => {
+            let _ = DestroyWindow(hwnd);
+            LRESULT(0)
+        }
+        WM_DESTROY => {
+            PostQuitMessage(0);
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
 }
 
 #[cfg(test)]

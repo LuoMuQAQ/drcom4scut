@@ -385,7 +385,7 @@ fn try_load_packet(path: &Path) -> Option<(bool, bool)> {
 
 use std::os::windows::ffi::OsStrExt;
 
-fn winhttp_download(
+pub(crate) fn winhttp_download(
     url: &str,
     dest: &Path,
     progress: &mut dyn FnMut(u64, Option<u64>) -> bool,
@@ -544,7 +544,7 @@ mod url {
     }
 }
 
-fn authenticode_publisher(path: &Path) -> Result<String, String> {
+pub(crate) fn authenticode_publisher(path: &Path) -> Result<String, String> {
     use windows::Win32::Foundation::{HANDLE, HWND};
     use windows::Win32::Security::WinTrust::{
         WinVerifyTrust, WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0,

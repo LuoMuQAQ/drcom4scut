@@ -18,6 +18,8 @@ pub mod sid;
 pub mod transaction;
 pub mod ui;
 pub mod validate;
+pub mod webview_bootstrapper;
+pub mod setup_webview;
 
 pub const APP_DISPLAY_NAME: &str = "校园网认证客户端";
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");

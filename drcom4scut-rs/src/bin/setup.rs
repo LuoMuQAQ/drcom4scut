@@ -1,4 +1,5 @@
 #![windows_subsystem = "windows"]
+#![allow(dead_code)]
 //! Native installer: responsive unelevated UI, elevated file/driver worker.
 use drcom4scut_gui::install::{
     acl, driver, driver_flow, flow, identity, knownfolder, origin, process, sid,
