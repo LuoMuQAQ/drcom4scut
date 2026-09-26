@@ -900,9 +900,12 @@ unsafe fn ensure_combo_popup(main: HWND) -> HWND {
         return existing;
     }
     let popup = CreateWindowExW(
+        // Topmost like a native dropdown: the card overlaps the owner's child
+        // buttons (connect/remember), which must not swallow item clicks.
         WINDOW_EX_STYLE(
             WS_EX_TOOLWINDOW.0
                 | WS_EX_NOACTIVATE.0
+                | windows::Win32::UI::WindowsAndMessaging::WS_EX_TOPMOST.0
                 | windows::Win32::UI::WindowsAndMessaging::WS_EX_LAYERED.0,
         ),
         class_name,

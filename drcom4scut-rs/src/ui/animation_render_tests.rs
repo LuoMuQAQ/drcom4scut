@@ -564,6 +564,125 @@ unsafe fn click_background(scene: &Scene) {
 }
 
 #[test]
+fn combo_popup_mouse_click_selects_item() {
+    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+    unsafe {
+        let mut scene = Scene::new_themed(96, false);
+        scene.attach_native_controls();
+        // Open through the same BN_CLICKED command path a mouse click uses.
+        v3::command(scene.hwnd, 1102);
+        assert!(scene.app.combo_open, "combo popup must open");
+        let popup = scene.app.hwnd_popup;
+        assert!(!popup.0.is_null(), "popup window must exist");
+        // Item 1 center in popup client coords: shadow 10 + pad 8 + 1*40 + 20.
+        let (x, y) = (100i32, 78i32);
+        combo_popup_wndproc(
+            popup,
+            WM_LBUTTONDOWN,
+            WPARAM(0),
+            LPARAM(((y << 16) | x) as isize),
+        );
+        assert_eq!(scene.app.combo_sel, 1, "clicking item 1 must select it");
+        assert!(!scene.app.combo_open, "popup must close after selection");
+        dismiss_combo(scene.hwnd);
+        let _ = ShowWindow(popup, SW_HIDE);
+    }
+}
+
+#[test]
+fn combo_popup_receives_os_mouse_clicks() {
+    unsafe fn os_click_roundtrip(dpi: u32) {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            mouse_event, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        struct RestoreCursor(POINT);
+        impl Drop for RestoreCursor {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = SetCursorPos(self.0.x, self.0.y);
+                }
+            }
+        }
+        let mut saved = POINT::default();
+        let _ = GetCursorPos(&mut saved);
+        let _restore = RestoreCursor(saved);
+        let mut scene = Scene::new_themed(dpi, false);
+        scene.attach_native_controls();
+        // Show the parent at a fixed spot so the popup gets real screen geometry.
+        let _ = SetWindowPos(
+            scene.hwnd,
+            None,
+            100,
+            100,
+            scene.full().right,
+            scene.full().bottom,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+        v3::command(scene.hwnd, 1102);
+        assert!(scene.app.combo_open, "combo popup must open");
+        // Complete the opening fade so the layered window is fully opaque.
+        scene.app.combo_visual = Anim::snap(1.0);
+        show_combo_popup(scene.hwnd);
+        let popup = scene.app.hwnd_popup;
+        assert!(!popup.0.is_null());
+        let mut prc = RECT::default();
+        let _ = GetWindowRect(popup, &mut prc);
+        assert!(
+            prc.right - prc.left > 100 && prc.bottom - prc.top > 100,
+            "popup must have real on-screen geometry at {dpi} DPI, got {prc:?}"
+        );
+        // Item 1 center in popup client coords, then to screen.
+        let mut pt = POINT {
+            x: scene.app.s(100),
+            y: scene.app.s(78),
+        };
+        let _ = ClientToScreen(popup, &mut pt);
+        let hit = WindowFromPoint(pt);
+        let overlaps_child = scene.app.buttons.iter().any(|(_, child)| {
+            let mut child_rect = RECT::default();
+            let _ = GetWindowRect(*child, &mut child_rect);
+            pt.x >= child_rect.left
+                && pt.x < child_rect.right
+                && pt.y >= child_rect.top
+                && pt.y < child_rect.bottom
+        });
+        assert!(
+            overlaps_child,
+            "item point must sit on an owner child button at {dpi} DPI, otherwise the click does not prove the popup is above those buttons"
+        );
+        assert_eq!(hit, popup, "item point must hit the popup at {dpi} DPI");
+        // Real OS-level click. Cursor is restored when this frame drops.
+        let _ = SetCursorPos(pt.x, pt.y);
+        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+        let mut msg = MSG::default();
+        for _ in 0..50 {
+            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            if !scene.app.combo_open {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            scene.app.combo_sel, 1,
+            "OS click must select item 1 at {dpi} DPI"
+        );
+        assert!(!scene.app.combo_open, "popup must close after OS click");
+        dismiss_combo(scene.hwnd);
+        let _ = ShowWindow(popup, SW_HIDE);
+        let _ = ShowWindow(scene.hwnd, SW_HIDE);
+    }
+
+    for dpi in [96, 120, 144, 192] {
+        unsafe { os_click_roundtrip(dpi) };
+    }
+}
+
+#[test]
 fn background_click_clears_native_focus_and_tab_can_restore_it() {
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus, VK_TAB};
     use windows::Win32::UI::WindowsAndMessaging::{IsDialogMessageW, GWL_STYLE, MSG};
