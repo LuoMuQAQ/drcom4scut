@@ -31,7 +31,7 @@ Windows GUI / 安装包的公开版本号从 **0.3.1** 开始，与上游最新 
 
 内嵌认证核心基于上游提交 `ef20ae5c71744eb9e096f5e586713490ba01f4ee`（核心自身版本 0.3.2），在上游之外加入环境变量凭据、移除密码日志，以及 GUI 退出时发送 EAPOL-Logoff 并随 GUI 结束。核心保持真实版本号，与 GUI 的发行版本独立；见 `drcom4scut_0.3.1/vendor/drcom4scut-0.3.2/PATCHES.md`。
 
-本次 HeroUI / UDP 修订二进制的对应源码为 [windows-v0.3.6-heroui](https://github.com/LuoMuQAQ/drcom4scut/tree/windows-v0.3.6-heroui)。发布页沿用 windows-v0.3.6，原始标签保留；请使用发布说明中的本次修订源码链接或专用源码附件。
+本次适配器下拉修订的对应源码为 [windows-v0.3.6-combo-select](https://github.com/LuoMuQAQ/drcom4scut/tree/windows-v0.3.6-combo-select)。发布页沿用 windows-v0.3.6，原始标签与此前 heroui / fidelity 标签保留；请使用发布说明中的本次源码链接或专用源码附件。
 
 ## 构建
 

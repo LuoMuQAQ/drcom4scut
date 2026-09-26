@@ -191,6 +191,17 @@ pub(super) unsafe fn command(hwnd: HWND, id: usize) -> bool {
     let Some(hit) = id.checked_sub(BASE).and_then(|i| BUTTONS.get(i)).copied() else {
         return false;
     };
+    // A click on a child button covered by the open list is an item click.
+    // Swallow it so Connect/Remember cannot run instead of changing the adapter.
+    if hit != Hit::Combo
+        && app_mut(hwnd).is_some_and(|app| app.combo_open)
+        && cursor_in_combo_popup(hwnd)
+    {
+        if !select_combo_at_cursor(hwnd) {
+            close_combo(hwnd);
+        }
+        return true;
+    }
     match hit {
         Hit::TabConnect => switch_page(hwnd, false),
         Hit::TabSettings => switch_page(hwnd, true),

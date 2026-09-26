@@ -7,22 +7,24 @@ use std::time::Instant;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, ClientToScreen, CreateCompatibleDC, DeleteDC, EndPaint, FillRect, SelectObject,
-    SetBkColor, SetBkMode, SetTextColor, TextOutW, HDC, PAINTSTRUCT, TRANSPARENT,
+    BeginPaint, ClientToScreen, CreateCompatibleDC, DeleteDC, EndPaint, FillRect, ScreenToClient,
+    SelectObject, SetBkColor, SetBkMode, SetTextColor, HDC, PAINTSTRUCT, TRANSPARENT,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, VK_ESCAPE};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetCapture, ReleaseCapture, SetCapture, SetFocus, VK_ESCAPE,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetParent, GetWindowLongPtrW,
-    GetWindowTextW, KillTimer, LoadCursorW, LoadImageW, MessageBoxW, PostQuitMessage,
-    RegisterClassW, SendMessageW, SetCursor, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
-    SetWindowTextW, ShowWindow, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HMENU, IDC_ARROW, IDC_HAND,
-    IDYES, IMAGE_ICON, LR_LOADFROMFILE, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MB_YESNO,
-    SW_HIDE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNA, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_ACTIVATE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX,
-    WM_CTLCOLORSTATIC, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NCLBUTTONDOWN, WM_PAINT, WM_SETFONT, WM_TIMER, WNDCLASSW, WS_CHILD,
-    WS_CLIPCHILDREN, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP, WS_SYSMENU,
-    WS_TABSTOP, WS_VISIBLE,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos, GetParent,
+    GetWindowLongPtrW, GetWindowRect, GetWindowTextW, KillTimer, LoadCursorW, LoadImageW,
+    MessageBoxW, PostQuitMessage, RegisterClassW, SendMessageW, SetCursor, SetForegroundWindow,
+    SetTimer, SetWindowLongPtrW, SetWindowTextW, ShowWindow, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA,
+    HMENU, IDC_ARROW, IDC_HAND, IDYES, IMAGE_ICON, LR_LOADFROMFILE, MA_NOACTIVATE,
+    MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MB_YESNO, SW_HIDE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
+    SW_SHOWNA, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CANCELMODE, WM_CLOSE, WM_COMMAND,
+    WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_ERASEBKGND,
+    WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCLBUTTONDOWN,
+    WM_PAINT, WM_SETFONT, WM_TIMER, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_EX_APPWINDOW,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
 use crate::controller::ReconnectBackoff;
@@ -577,11 +579,39 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_ACTIVATE => {
             if (wparam.0 & 0xFFFF) == 0 {
-                dismiss_combo(hwnd);
+                let other = HWND(lparam.0 as *mut _);
+                let popup = app_mut(hwnd)
+                    .map(|app| app.hwnd_popup)
+                    .unwrap_or(HWND(std::ptr::null_mut()));
+                // Clicking the list must not clear it before the click is interpreted.
+                if other != popup {
+                    dismiss_combo(hwnd);
+                }
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
+        WM_CANCELMODE => {
+            dismiss_combo(hwnd);
+            LRESULT(0)
+        }
         WM_LBUTTONDOWN => {
+            if app_mut(hwnd).is_some_and(|app| app.combo_open) {
+                let y = ((lparam.0 as u32) >> 16) as i16 as i32;
+                let x = (lparam.0 as u32 & 0xFFFF) as i16 as i32;
+                // Eat the click. The list overlaps owner-drawn child buttons, and
+                // those buttons must not connect, toggle, or reopen the field.
+                if select_combo_at_owner_point(hwnd, x, y) {
+                    return LRESULT(0);
+                }
+                close_combo(hwnd);
+                let hit = app_mut(hwnd)
+                    .map(|app| hit_test(app, x, y))
+                    .unwrap_or(Hit::None);
+                if matches!(hit, Hit::None | Hit::Drag) {
+                    let _ = SetFocus(Some(hwnd));
+                }
+                return LRESULT(0);
+            }
             let y = ((lparam.0 as u32) >> 16) as i16 as i32;
             let x = (lparam.0 as u32 & 0xFFFF) as i16 as i32;
             let hit = app_mut(hwnd)
@@ -633,6 +663,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
+            if app_mut(hwnd).is_some_and(|app| app.combo_open) {
+                let y = ((lparam.0 as u32) >> 16) as i16 as i32;
+                let x = (lparam.0 as u32 & 0xFFFF) as i16 as i32;
+                track_combo_owner_point(hwnd, x, y);
+                return LRESULT(0);
+            }
             let y = ((lparam.0 as u32) >> 16) as i16 as i32;
             let x = (lparam.0 as u32 & 0xFFFF) as i16 as i32;
             if let Some(app) = app_mut(hwnd) {
@@ -772,6 +808,11 @@ unsafe fn toggle_combo(hwnd: HWND) {
             app.combo_hot = app.combo_sel;
         }
         show_combo_popup(hwnd);
+        // The owner is the foreground window. Capturing here keeps item clicks
+        // from falling through to the child buttons under the list.
+        if app_mut(hwnd).is_some_and(|app| app.combo_open) {
+            let _ = SetCapture(hwnd);
+        }
         // First-time shadow rasterization must not consume the opening tween.
         if let Some(app) = app_mut(hwnd) {
             if app.combo_open {
@@ -784,13 +825,14 @@ unsafe fn toggle_combo(hwnd: HWND) {
 }
 
 unsafe fn close_combo(hwnd: HWND) {
+    // Focus notifications can repeat while closing. Never restart the fade.
+    if !app_mut(hwnd).is_some_and(|app| app.combo_open) {
+        return;
+    }
+    release_combo_capture(hwnd);
     let Some(app) = app_mut(hwnd) else {
         return;
     };
-    // Focus notifications can repeat while closing. Never restart the fade.
-    if !app.combo_open {
-        return;
-    }
     app.combo_open = false;
     app.combo_visual = Anim::go(app.combo_visual.value(), 0.0, COMBO_CLOSE_MS);
     if app.combo_visual.done() && !app.hwnd_popup.0.is_null() {
@@ -803,6 +845,7 @@ unsafe fn close_combo(hwnd: HWND) {
 /// Stop popup presentation before hiding/minimizing the owner. A queued frame
 /// must not show an owned popup again after its owner disappeared.
 unsafe fn dismiss_combo(hwnd: HWND) {
+    release_combo_capture(hwnd);
     if let Some(app) = app_mut(hwnd) {
         app.combo_open = false;
         app.combo_visual = Anim::snap(0.0);
@@ -900,8 +943,9 @@ unsafe fn ensure_combo_popup(main: HWND) -> HWND {
         return existing;
     }
     let popup = CreateWindowExW(
-        // Topmost like a native dropdown: the card overlaps the owner's child
-        // buttons (connect/remember), which must not swallow item clicks.
+        // Topmost is not sufficient: the owner has WS_CLIPCHILDREN, and a
+        // layered popup can still lose the click to the buttons it covers.
+        // Opening the list also captures the owner and swallows those clicks.
         WINDOW_EX_STYLE(
             WS_EX_TOOLWINDOW.0
                 | WS_EX_NOACTIVATE.0
@@ -937,6 +981,7 @@ unsafe extern "system" fn combo_popup_wndproc(
     let main = HWND(GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut _);
     match msg {
         WM_ERASEBKGND => LRESULT(1),
+        WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             let _ = BeginPaint(hwnd, &mut ps);
@@ -997,6 +1042,90 @@ fn combo_max_scroll(app: &App, popup: HWND) -> i32 {
     }
     let inner = (rc.bottom - shadow * 2).max(0);
     (content - inner).max(0)
+}
+
+unsafe fn release_combo_capture(main: HWND) {
+    if GetCapture() == main {
+        let _ = ReleaseCapture();
+    }
+}
+
+unsafe fn popup_item_from_screen(main: HWND, mut pt: POINT) -> Option<i32> {
+    let popup = app_mut(main)?.hwnd_popup;
+    if popup.0.is_null() {
+        return None;
+    }
+    let _ = ScreenToClient(popup, &mut pt);
+    popup_item_at(main, popup, pt.x, pt.y)
+}
+
+unsafe fn select_combo_at_owner_point(main: HWND, x: i32, y: i32) -> bool {
+    let mut pt = POINT { x, y };
+    let _ = ClientToScreen(main, &mut pt);
+    let Some(i) = popup_item_from_screen(main, pt) else {
+        return false;
+    };
+    if let Some(app) = app_mut(main) {
+        app.combo_sel = i;
+    }
+    close_combo(main);
+    true
+}
+
+unsafe fn track_combo_owner_point(main: HWND, x: i32, y: i32) {
+    let mut pt = POINT { x, y };
+    let _ = ClientToScreen(main, &mut pt);
+    let Some(popup) = app_mut(main).map(|app| app.hwnd_popup) else {
+        return;
+    };
+    if popup.0.is_null() {
+        return;
+    }
+    let _ = ScreenToClient(popup, &mut pt);
+    let hot = popup_item_at(main, popup, pt.x, pt.y).unwrap_or(-1);
+    if let Some(app) = app_mut(main) {
+        if hot != app.combo_hot {
+            app.combo_hot = hot;
+            let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(popup), None, false);
+        }
+    }
+}
+
+/// True when the cursor is inside the popup window, even if a child button
+/// underneath is the current hit-test target.
+pub(super) unsafe fn cursor_in_combo_popup(main: HWND) -> bool {
+    let Some(popup) = app_mut(main).map(|app| app.hwnd_popup) else {
+        return false;
+    };
+    if popup.0.is_null()
+        || !windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(popup).as_bool()
+    {
+        return false;
+    }
+    let mut pt = POINT::default();
+    if GetCursorPos(&mut pt).is_err() {
+        return false;
+    }
+    let mut rc = RECT::default();
+    if GetWindowRect(popup, &mut rc).is_err() {
+        return false;
+    }
+    pt.x >= rc.left && pt.x < rc.right && pt.y >= rc.top && pt.y < rc.bottom
+}
+
+pub(super) unsafe fn select_combo_at_cursor(main: HWND) -> bool {
+    let mut pt = POINT::default();
+    if GetCursorPos(&mut pt).is_err() {
+        return false;
+    }
+    let Some(i) = popup_item_from_screen(main, pt) else {
+        return false;
+    };
+    if let Some(app) = app_mut(main) {
+        app.combo_sel = i;
+    }
+    close_combo(main);
+    true
 }
 
 fn popup_item_at(main: HWND, popup: HWND, x: i32, y: i32) -> Option<i32> {
@@ -1212,36 +1341,58 @@ unsafe fn paint_combo_popup_ui(app: &App, hdc: HDC, w: i32, h: i32) {
                 2,
             );
         }
+        // Match the closed field's text column (field left 30, label 68)
+        // and keep a real right margin. TextOut clipped glyphs on the card edge.
+        let text_left = shadow + s(38);
+        let text_right = rc.right - shadow - s(20);
+        let line = windows::Win32::Graphics::Gdi::DT_SINGLELINE
+            | windows::Win32::Graphics::Gdi::DT_END_ELLIPSIS
+            | windows::Win32::Graphics::Gdi::DT_VCENTER;
         if i == 0 {
-            paint_text(
+            super::hero::text(
                 hdc,
                 app.font,
                 palette.text_primary,
-                shadow + s(20),
-                y + s(10),
+                RECT {
+                    left: text_left,
+                    top: y,
+                    right: text_right,
+                    bottom: y + item_h,
+                },
                 "自动选择",
+                line,
             );
         } else if let Some(a) = app.adapters.get((i as usize) - 1) {
-            paint_text(
+            super::hero::text(
                 hdc,
                 app.font,
                 palette.text_primary,
-                shadow + s(20),
-                y + s(4),
+                RECT {
+                    left: text_left,
+                    top: y + s(5),
+                    right: text_right,
+                    bottom: y + s(22),
+                },
                 &a.name,
+                line,
             );
             let sub = format!(
                 "{}  ·  {}",
                 a.mac,
                 if a.is_up { "已连接" } else { "未连接" }
             );
-            paint_text(
+            super::hero::text(
                 hdc,
                 app.font_label,
                 palette.text_secondary,
-                shadow + s(20),
-                y + s(22),
+                RECT {
+                    left: text_left,
+                    top: y + s(20),
+                    right: text_right,
+                    bottom: y + item_h - s(5),
+                },
                 &sub,
+                line,
             );
         }
     }
@@ -2177,23 +2328,6 @@ unsafe fn paint_chevron(
         color,
         t,
     );
-}
-
-unsafe fn paint_text(
-    hdc: HDC,
-    font: windows::Win32::Graphics::Gdi::HFONT,
-    color: windows::Win32::Foundation::COLORREF,
-    x: i32,
-    y: i32,
-    s: &str,
-) {
-    let old = SelectObject(hdc, font_as_gdi(font));
-    let _ = SetTextColor(hdc, color);
-    let t = wide(s);
-    if t.len() > 1 {
-        let _ = TextOutW(hdc, x, y, &t[..t.len() - 1]);
-    }
-    let _ = SelectObject(hdc, old);
 }
 
 unsafe fn paint_caption_btn(

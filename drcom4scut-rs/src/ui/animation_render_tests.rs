@@ -125,10 +125,12 @@ impl Scene {
 
 unsafe extern "system" fn fixture_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     use windows::Win32::UI::WindowsAndMessaging::*;
+    let combo_open = app_mut(hwnd).is_some_and(|app| app.combo_open);
     if matches!(
         msg,
         WM_DRAWITEM | WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC | WM_COMMAND
-    ) {
+    ) || (combo_open && matches!(msg, WM_LBUTTONDOWN | WM_MOUSEMOVE))
+    {
         wndproc(hwnd, msg, wp, lp)
     } else {
         DefWindowProcW(hwnd, msg, wp, lp)
@@ -561,6 +563,72 @@ unsafe fn click_background(scene: &Scene) {
         WPARAM(0),
         LPARAM(((y << 16) | x) as isize),
     );
+}
+
+#[test]
+fn overlapped_child_click_selects_combo_item_instead_of_the_button() {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{ClientToScreen, ScreenToClient};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        ChildWindowFromPoint, GetCursorPos, SendMessageW, SetCursorPos, SetWindowPos, ShowWindow,
+        SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE,
+    };
+    unsafe {
+        let mut scene = Scene::new_themed(96, false);
+        scene.attach_native_controls();
+        let _ = SetWindowPos(
+            scene.hwnd,
+            None,
+            80,
+            80,
+            scene.full().right,
+            scene.full().bottom,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+        v3::command(scene.hwnd, 1102);
+        assert!(scene.app.combo_open);
+        scene.app.combo_visual = Anim::snap(1.0);
+        show_combo_popup(scene.hwnd);
+        let popup = scene.app.hwnd_popup;
+        let mut pt = POINT {
+            x: scene.app.s(100),
+            y: scene.app.s(78),
+        };
+        let _ = ClientToScreen(popup, &mut pt);
+        let mut owner_pt = pt;
+        let _ = ScreenToClient(scene.hwnd, &mut owner_pt);
+        let under = ChildWindowFromPoint(scene.hwnd, owner_pt);
+        let stolen = scene
+            .app
+            .buttons
+            .iter()
+            .find(|(_, child)| *child == under)
+            .map(|(hit, child)| (*hit, *child));
+        let (hit, child) = stolen.expect("item point must sit on a child button");
+        assert_ne!(
+            hit,
+            Hit::Combo,
+            "the overlapped control must not be the field itself"
+        );
+        let running = scene.app.desired_running;
+        let remember = scene.app.settings.remember_password;
+        let mut saved = POINT::default();
+        let _ = GetCursorPos(&mut saved);
+        let _ = SetCursorPos(pt.x, pt.y);
+        // BM_CLICK: the same command a real mouse-up on that child button sends.
+        let _ = SendMessageW(child, 0x00f5, None, None);
+        assert_eq!(
+            scene.app.combo_sel, 1,
+            "click on {hit:?} must select the covered item"
+        );
+        assert!(!scene.app.combo_open);
+        assert_eq!(scene.app.desired_running, running);
+        assert_eq!(scene.app.settings.remember_password, remember);
+        let _ = SetCursorPos(saved.x, saved.y);
+        dismiss_combo(scene.hwnd);
+        let _ = ShowWindow(popup, SW_HIDE);
+        let _ = ShowWindow(scene.hwnd, SW_HIDE);
+    }
 }
 
 #[test]
