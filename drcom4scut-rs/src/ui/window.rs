@@ -45,7 +45,6 @@ mod v3;
 use super::tray::{HIconOrFile, Tray};
 use super::winutil::{
     self, brush_as_gdi, create_font, delete_gdi, destroy_icon, font_as_gdi, solid_brush, wide,
-    COLOR_PAGE,
 };
 
 pub const WM_APP_OPEN: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 10;
@@ -91,7 +90,6 @@ enum Hit {
     Combo,
     TabConnect,
     TabSettings,
-    Preferences,
 }
 
 struct App {
@@ -139,6 +137,10 @@ struct App {
     font_title: windows::Win32::Graphics::Gdi::HFONT,
     font_label: windows::Win32::Graphics::Gdi::HFONT,
     font_btn: windows::Win32::Graphics::Gdi::HFONT,
+    font_medium: windows::Win32::Graphics::Gdi::HFONT,
+    font_chip: windows::Win32::Graphics::Gdi::HFONT,
+    font_brand: windows::Win32::Graphics::Gdi::HFONT,
+    font_footer: windows::Win32::Graphics::Gdi::HFONT,
     icon_small: windows::Win32::UI::WindowsAndMessaging::HICON,
     icon_title: windows::Win32::UI::WindowsAndMessaging::HICON,
     icon_status: windows::Win32::UI::WindowsAndMessaging::HICON,
@@ -218,9 +220,13 @@ impl App {
             card_brush: solid_brush(palette.card),
             control_brush: solid_brush(palette.control),
             font: create_font(14, dpi, false),
-            font_title: create_font(28, dpi, true),
+            font_title: winutil::create_font_weight(28, dpi, 600),
             font_label: create_font(layout::CAPTION_SIZE, dpi, false),
             font_btn: create_font(14, dpi, true),
+            font_medium: winutil::create_font_weight(13, dpi, 500),
+            font_chip: create_font(12, dpi, false),
+            font_brand: winutil::create_font_weight(12, dpi, 600),
+            font_footer: create_font(11, dpi, false),
             icon_small: icon0,
             icon_title: icon0,
             icon_status: icon0,
@@ -278,6 +284,10 @@ impl Drop for App {
         delete_gdi(font_as_gdi(self.font_title));
         delete_gdi(font_as_gdi(self.font_label));
         delete_gdi(font_as_gdi(self.font_btn));
+        delete_gdi(font_as_gdi(self.font_medium));
+        delete_gdi(font_as_gdi(self.font_chip));
+        delete_gdi(font_as_gdi(self.font_brand));
+        delete_gdi(font_as_gdi(self.font_footer));
         if !self.icon_small.0.is_null() {
             destroy_icon(self.icon_small);
         }
@@ -301,7 +311,10 @@ pub fn create_main_window() -> Option<HWND> {
                 hInstance: hinstance.into(),
                 lpszClassName: class_name,
                 style: CS_HREDRAW | CS_VREDRAW,
-                hbrBackground: solid_brush(COLOR_PAGE),
+                // Theme-aware startup brush; avoids a light flash on dark systems.
+                hbrBackground: solid_brush(
+                    winutil::Palette::for_dark(winutil::is_system_dark_mode()).page,
+                ),
                 ..Default::default()
             };
             let _ = RegisterClassW(&wc);
@@ -514,17 +527,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             if di.CtlID == ID_EYE as u32 {
                 if let Some(app) = app_mut(hwnd) {
                     winutil::paint_buffered(di.hDC, di.rcItem, |dc| {
-                        let palette = winutil::Palette::for_dark(app.is_dark);
                         let _ = FillRect(dc, &di.rcItem, app.control_brush);
-                        if di.itemState.0 & 0x10 != 0 {
-                            winutil::fill_component(
-                                dc,
-                                di.rcItem,
-                                app.dpi,
-                                palette.control,
-                                Some(palette.accent),
-                            );
-                        }
                         let bmp = if app.pass_revealed {
                             &app.eye_off
                         } else {
@@ -624,7 +627,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     s.minimize_to_tray = !s.minimize_to_tray;
                 }),
                 Hit::TabConnect => v3::switch_page(hwnd, false),
-                Hit::TabSettings | Hit::Preferences => v3::switch_page(hwnd, true),
+                Hit::TabSettings => v3::switch_page(hwnd, true),
                 Hit::None => {}
             }
             LRESULT(0)
@@ -655,7 +658,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         | Hit::Combo
                         | Hit::TabConnect
                         | Hit::TabSettings
-                        | Hit::Preferences
                 ) {
                     IDC_HAND
                 } else {
@@ -736,7 +738,6 @@ fn hit_test(app: &App, x: i32, y: i32) -> Hit {
         Hit::Remember,
         Hit::Startup,
         Hit::TrayKeep,
-        Hit::Preferences,
     ] {
         if let Some(r) = v3::bounds(app, hit) {
             if x >= r.left && x < r.right && y >= r.top && y < r.bottom {
@@ -1043,11 +1044,16 @@ impl PopupSurface {
         let cw = w - edge * 2;
         let ch = h - edge * 2;
         let radius = winutil::component_radius(ch, app.dpi);
-        let (card_hex, stroke_hex, shadow_opacity) = if app.is_dark {
-            ("#18181b", "#3f3f46", ".35")
-        } else {
-            ("#ffffff", "#d4d4d8", ".12")
+        let palette = winutil::Palette::for_dark(app.is_dark);
+        let hex = |c: windows::Win32::Foundation::COLORREF| {
+            format!(
+                "#{:06x}",
+                ((c.0 & 255) << 16) | (c.0 & 0xff00) | ((c.0 >> 16) & 255)
+            )
         };
+        let card_hex = hex(palette.card);
+        let stroke_hex = hex(palette.stroke);
+        let shadow_opacity = if app.is_dark { ".35" } else { ".12" };
         let svg = format!(
             r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">
           <defs><filter id="shadow" x="-50%" y="-50%" width="200%" height="200%" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="{blur}"/></filter></defs>
@@ -1172,19 +1178,11 @@ unsafe fn paint_combo_popup_ui(app: &App, hdc: HDC, w: i32, h: i32) {
         let hovered = app.combo_hot == i;
         if selected || hovered {
             let bg = if selected {
-                if app.is_dark {
-                    windows::Win32::Foundation::COLORREF(0x00622E00) // #002E62 选中有色高亮
-                } else {
-                    windows::Win32::Foundation::COLORREF(0x00FEF1E6) // #E6F1FE 浅蓝底
-                }
+                palette.accent_soft
             } else {
-                if app.is_dark {
-                    palette.control
-                } else {
-                    palette.page
-                }
+                palette.stroke_hover
             };
-            winutil::fill_component(
+            super::hero::surface(
                 hdc,
                 RECT {
                     left: shadow + s(8),
@@ -1194,23 +1192,22 @@ unsafe fn paint_combo_popup_ui(app: &App, hdc: HDC, w: i32, h: i32) {
                 },
                 app.dpi,
                 bg,
-                None,
+                8,
             );
         }
         if selected {
-            let bar = solid_brush(palette.accent);
-            let prev = SelectObject(hdc, brush_as_gdi(bar));
-            let _ = windows::Win32::Graphics::Gdi::RoundRect(
+            super::hero::surface(
                 hdc,
-                shadow + s(8),
-                y + s(10),
-                shadow + s(11),
-                y + item_h - s(10),
-                s(2),
-                s(2),
+                RECT {
+                    left: shadow + s(8),
+                    top: y + s(10),
+                    right: shadow + s(11),
+                    bottom: y + item_h - s(10),
+                },
+                app.dpi,
+                palette.accent,
+                2,
             );
-            let _ = SelectObject(hdc, prev);
-            delete_gdi(brush_as_gdi(bar));
         }
         if i == 0 {
             paint_text(
@@ -2207,31 +2204,27 @@ unsafe fn paint_caption_btn(
     close: bool,
 ) {
     let palette = winutil::Palette::for_dark(app.is_dark);
+    let bounds = RECT {
+        left: x,
+        top: y,
+        right: x + bw,
+        bottom: y + bh,
+    };
     if hover {
+        // Ghost caption buttons: square fill, tinted only on close.
         let fill = if close {
-            palette.danger
+            palette.danger_soft
         } else {
-            palette.stroke_hover
+            palette.toggle_off
         };
-        winutil::fill_component(
-            hdc,
-            RECT {
-                left: x,
-                top: y,
-                right: x + bw,
-                bottom: y + bh,
-            },
-            app.dpi,
-            fill,
-            None,
-        );
+        super::hero::line(hdc, bounds, fill);
     }
     let color = if hover && close {
-        windows::Win32::Foundation::COLORREF(0x00FFFFFF)
+        palette.danger_text
     } else {
-        palette.text_primary
+        palette.text_secondary
     };
-    let size = app.s(20);
+    let size = app.s(14);
     let cx = x + bw / 2;
     let cy = y + bh / 2;
     super::hero::icon(

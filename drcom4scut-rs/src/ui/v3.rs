@@ -6,12 +6,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-const BUTTONS: [Hit; 9] = [
+const BUTTONS: [Hit; 8] = [
     Hit::TabConnect,
     Hit::TabSettings,
     Hit::Combo,
     Hit::Remember,
-    Hit::Preferences,
     Hit::Connect,
     Hit::Auto,
     Hit::Startup,
@@ -28,7 +27,6 @@ pub(super) fn bounds(app: &App, hit: Hit) -> Option<RECT> {
         Hit::Combo if !app.preferences => Some(r(30, layout::COMBO_TOP, 420, 46)),
         Hit::Connect if !app.preferences => Some(r(30, layout::ACTION_TOP, 420, 44)),
         Hit::Remember if !app.preferences => Some(r(30, layout::REMEMBER_TOP, 150, 36)),
-        Hit::Preferences if !app.preferences => Some(r(350, layout::REMEMBER_TOP, 100, 36)),
         Hit::Auto | Hit::Remember | Hit::Startup | Hit::TrayKeep if app.preferences => {
             let index = match hit {
                 Hit::Auto => 0,
@@ -55,7 +53,7 @@ fn label(app: &App, hit: Hit) -> String {
         );
     match hit {
         Hit::TabConnect => "连接".into(),
-        Hit::TabSettings | Hit::Preferences => "偏好设置".into(),
+        Hit::TabSettings => "偏好设置".into(),
         Hit::Combo => format!("网络适配器：{}", combo_label(app)),
         Hit::Connect => if disconnect {
             "断开连接"
@@ -195,7 +193,7 @@ pub(super) unsafe fn command(hwnd: HWND, id: usize) -> bool {
     };
     match hit {
         Hit::TabConnect => switch_page(hwnd, false),
-        Hit::TabSettings | Hit::Preferences => switch_page(hwnd, true),
+        Hit::TabSettings => switch_page(hwnd, true),
         Hit::Combo => toggle_combo(hwnd),
         Hit::Connect => on_action(hwnd),
         Hit::Auto => toggle_flag(hwnd, 0, |s| s.auto_login = !s.auto_login),
@@ -332,9 +330,10 @@ pub(super) unsafe fn draw_item(
     let Some(r) = bounds(app, hit) else {
         return true;
     };
+    let pressed = d.itemState.0 & 0x1 != 0; // ODS_SELECTED
     winutil::paint_buffered(d.hDC, d.rcItem, |dc| {
         let _ = OffsetViewportOrgEx(dc, -r.left, -r.top, None);
-        paint_button(app, dc, hit);
+        paint_button(app, dc, hit, pressed);
         let _ = OffsetViewportOrgEx(dc, r.left, r.top, None);
     });
     true
@@ -373,7 +372,23 @@ pub(super) unsafe fn repaint_buttons(app: &App) {
     }
 }
 
-pub(super) unsafe fn paint_button(app: &App, dc: HDC, hit: Hit) {
+/// Text width at the current device resolution, for centering icon+label groups.
+unsafe fn text_width(dc: HDC, font: windows::Win32::Graphics::Gdi::HFONT, value: &str) -> i32 {
+    let saved = SaveDC(dc);
+    SelectObject(dc, winutil::font_as_gdi(font));
+    let mut r = RECT::default();
+    let mut value: Vec<u16> = value.encode_utf16().collect();
+    let _ = DrawTextW(
+        dc,
+        &mut value,
+        &mut r,
+        DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
+    );
+    let _ = RestoreDC(dc, saved);
+    r.right - r.left
+}
+
+pub(super) unsafe fn paint_button(app: &App, dc: HDC, hit: Hit, pressed: bool) {
     let Some(r) = bounds(app, hit) else { return };
     let p = winutil::Palette::for_dark(app.is_dark);
     let s = |v| app.s(v);
@@ -383,6 +398,7 @@ pub(super) unsafe fn paint_button(app: &App, dc: HDC, hit: Hit) {
     hero::line(dc, r, p.page);
     match hit {
         Hit::TabConnect | Hit::TabSettings => {
+            // Shared track; redrawn here so partial button repaints stay whole.
             hero::surface(
                 dc,
                 hero::rect(app.dpi, 30, layout::TABS_TOP, 420, 40),
@@ -392,40 +408,66 @@ pub(super) unsafe fn paint_button(app: &App, dc: HDC, hit: Hit) {
             );
             let selected = app.preferences == (hit == Hit::TabSettings);
             if selected {
-                hero::surface(
-                    dc,
-                    r,
-                    app.dpi,
-                    if app.is_dark { p.stroke_hover } else { p.card },
-                    24,
-                );
+                if !app.is_dark {
+                    hero::box_shadow(dc, r, app.dpi, s(24), &hero::FIELD_SHADOW);
+                }
+                hero::surface(dc, r, app.dpi, p.segment, 24);
             }
+            let (symbol, caption) = if hit == Hit::TabConnect {
+                (Icon::PlugZap, "连接")
+            } else {
+                (Icon::SlidersHorizontal, "偏好设置")
+            };
+            let color = if selected {
+                p.text_primary
+            } else {
+                p.text_secondary
+            };
+            let tw = text_width(dc, app.font_medium, caption);
+            let icon_w = s(16);
+            let gap = s(7);
+            let total = icon_w + gap + tw;
+            let mut x = r.left + (r.right - r.left - total) / 2;
+            hero::icon(
+                dc,
+                RECT {
+                    left: x,
+                    top: r.top + (r.bottom - r.top - icon_w) / 2,
+                    right: x + icon_w,
+                    bottom: r.top + (r.bottom - r.top - icon_w) / 2 + icon_w,
+                },
+                color,
+                symbol,
+            );
+            x += icon_w + gap;
             hero::text(
                 dc,
-                app.font,
-                if selected {
-                    p.text_primary
-                } else {
-                    p.text_secondary
+                app.font_medium,
+                color,
+                RECT {
+                    left: x,
+                    top: r.top,
+                    right: r.right,
+                    bottom: r.bottom,
                 },
-                r,
-                if hit == Hit::TabConnect {
-                    "连接"
-                } else {
-                    "偏好设置"
-                },
-                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                caption,
+                DT_VCENTER | DT_SINGLELINE,
             );
         }
         Hit::Combo => {
             let mut field = r;
             field.bottom -= s(2);
-            hero::field(dc, field, app.dpi, p, false);
+            let state = if hot && !app.combo_open {
+                hero::FieldState::Hover
+            } else {
+                hero::FieldState::Normal
+            };
+            hero::field(dc, field, app.dpi, p, state);
             hero::icon(
                 dc,
                 hero::rect(app.dpi, 42, layout::COMBO_TOP + 13, 18, 18),
                 p.text_secondary,
-                Icon::Network,
+                Icon::EthernetPort,
             );
             hero::text(
                 dc,
@@ -450,61 +492,73 @@ pub(super) unsafe fn paint_button(app: &App, dc: HDC, hit: Hit) {
                     app.link_state,
                     LinkState::Online | LinkState::Connecting | LinkState::Waiting
                 );
-            let fill = if !app.connect_enabled {
-                p.disabled_bg
-            } else if disconnect {
-                hero::soft(p, p.danger)
-            } else if hot {
-                p.accent_hover
+            let normal = if disconnect { p.danger_soft } else { p.accent };
+            let hover = if disconnect {
+                p.stroke_hover
             } else {
-                p.accent
+                p.accent_hover
             };
-            hero::control_surface(dc, r, app.dpi, fill);
+            let active = if disconnect {
+                p.stroke_hover
+            } else {
+                p.accent_active
+            };
+            // Disabled follows the sketch's 50% opacity semantics.
+            let fill = if !app.connect_enabled {
+                hero::mix(p.page, normal, 50)
+            } else if pressed {
+                active
+            } else if hot {
+                hover
+            } else {
+                normal
+            };
+            hero::action_surface(dc, r, app.dpi, fill);
             let color = if !app.connect_enabled {
-                p.text_secondary
+                hero::mix(fill, p.on_accent, 50)
             } else if disconnect {
                 p.danger_text
             } else {
-                windows::Win32::Foundation::COLORREF(0xFFFFFF)
+                p.on_accent
             };
+            let caption = label(app, hit);
+            let tw = text_width(dc, app.font_btn, &caption);
+            let icon_w = s(18);
+            let gap = s(8);
+            let total = icon_w + gap + tw;
+            let mut x = r.left + (r.right - r.left - total) / 2;
+            hero::icon(
+                dc,
+                RECT {
+                    left: x,
+                    top: r.top + (r.bottom - r.top - icon_w) / 2,
+                    right: x + icon_w,
+                    bottom: r.top + (r.bottom - r.top - icon_w) / 2 + icon_w,
+                },
+                color,
+                Icon::ArrowRight,
+            );
+            x += icon_w + gap;
             hero::text(
                 dc,
                 app.font_btn,
                 color,
-                r,
-                &label(app, hit),
-                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                RECT {
+                    left: x,
+                    top: r.top,
+                    right: r.right,
+                    bottom: r.bottom,
+                },
+                &caption,
+                DT_VCENTER | DT_SINGLELINE,
             );
         }
-        Hit::Preferences => hero::text(
-            dc,
-            app.font_label,
-            p.accent,
-            r,
-            "连接偏好",
-            DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
-        ),
         Hit::Remember if !app.preferences => {
             let on = app.toggle_anim[1].value();
-            let box_r = hero::rect(app.dpi, 30, layout::REMEMBER_TOP + 9, 18, 18);
-            winutil::fill_round(
-                dc,
-                box_r,
-                s(5),
-                hero::mix(p.control, p.accent, (on * 100.0) as u32),
-                if on < 0.5 { Some(p.stroke) } else { None },
-            );
-            if on > 0.5 {
-                hero::icon(
-                    dc,
-                    hero::rect(app.dpi, 32, layout::REMEMBER_TOP + 11, 14, 14),
-                    windows::Win32::Foundation::COLORREF(0xFFFFFF),
-                    Icon::Check,
-                );
-            }
+            hero::checkbox(dc, 30, layout::REMEMBER_TOP + 9, app.dpi, p, on);
             hero::text(
                 dc,
-                app.font_label,
+                app.font_chip,
                 p.text_primary,
                 hero::rect(app.dpi, 56, layout::REMEMBER_TOP, 124, 36),
                 "记住密码",
@@ -521,23 +575,23 @@ pub(super) unsafe fn paint_button(app: &App, dc: HDC, hit: Hit) {
             let y = layout::SETTINGS_TOP + index as i32 * layout::SETTINGS_ROW;
             hero::text(
                 dc,
-                app.font,
+                app.font_medium,
                 p.text_primary,
-                hero::rect(app.dpi, 30, y + 5, 354, 24),
+                hero::rect(app.dpi, 30, y + 7, 354, 22),
                 title,
                 DT_SINGLELINE | DT_END_ELLIPSIS,
             );
             hero::text(
                 dc,
-                app.font,
+                app.font_chip,
                 p.text_secondary,
-                hero::rect(app.dpi, 30, y + 31, 354, 24),
+                hero::rect(app.dpi, 30, y + 33, 354, 20),
                 detail,
                 DT_SINGLELINE | DT_END_ELLIPSIS,
             );
             hero::switch(dc, 404, y + 19, app.dpi, p, app.toggle_anim[index].value());
             if index < 3 {
-                hero::line(dc, hero::rect(app.dpi, 30, y + 67, 420, 1), p.stroke);
+                hero::line(dc, hero::rect(app.dpi, 30, y + 69, 420, 1), p.stroke);
             }
         }
     }
@@ -549,23 +603,24 @@ pub(super) unsafe fn paint_ui(hwnd: HWND, dc: HDC) {
     let Some(app) = app_mut(hwnd) else { return };
     let p = winutil::Palette::for_dark(app.is_dark);
     let r = |x, y, w, h| hero::rect(app.dpi, x, y, w, h);
+    let s = |v: i32| app.s(v);
     hero::line(dc, r(0, 0, CLIENT_W, CLIENT_H), p.page);
-    hero::line(dc, r(0, 47, CLIENT_W, 1), p.stroke);
-    hero::logo(dc, r(16, 11, 26, 26));
+    hero::line(dc, r(0, 47, CLIENT_W, 1), hero::mix(p.page, p.stroke, 55));
+    hero::logo(dc, r(16, 14, 20, 20));
     hero::text(
         dc,
-        app.font_label,
+        app.font_brand,
         p.text_primary,
-        r(46, 0, 300, 48),
+        r(44, 0, 300, 48),
         "drcom4scut",
         DT_SINGLELINE | DT_VCENTER,
     );
     paint_caption_btn(
         dc,
         app,
-        app.s(CLIENT_W - 92),
+        app.s(CLIENT_W - 84),
         0,
-        app.s(46),
+        app.s(42),
         app.s(TITLE_H),
         app.hover == Hit::Min,
         false,
@@ -573,15 +628,17 @@ pub(super) unsafe fn paint_ui(hwnd: HWND, dc: HDC) {
     paint_caption_btn(
         dc,
         app,
-        app.s(CLIENT_W - 46),
+        app.s(CLIENT_W - 42),
         0,
-        app.s(46),
+        app.s(42),
         app.s(TITLE_H),
         app.hover == Hit::Close,
         true,
     );
-    let status = winutil::state_color(app.link_state);
-    hero::surface(dc, r(30, 78, 44, 44), app.dpi, hero::soft(p, p.accent), 14);
+    let status = winutil::state_color(&p, app.link_state);
+    let (status_bg, status_fg) = winutil::state_pair(&p, app.link_state);
+    hero::surface(dc, r(30, 78, 44, 44), app.dpi, status_bg, 14);
+    // The status chip keeps the original brand artwork.
     hero::logo(dc, r(35, 83, 34, 34));
     let chip = match app.link_state {
         LinkState::Online => "已连接",
@@ -591,14 +648,16 @@ pub(super) unsafe fn paint_ui(hwnd: HWND, dc: HDC) {
         LinkState::Error => "连接失败",
         LinkState::Offline => "离线",
     };
-    hero::surface(dc, r(354, 87, 96, 26), app.dpi, hero::soft(p, status), 16);
-    hero::text(
+    hero::chip(
         dc,
-        app.font_label,
-        p.text_primary,
-        r(354, 87, 96, 26),
+        app.font_chip,
+        s(450),
+        s(87),
+        app.dpi,
+        status_bg,
+        status_fg,
+        Some(status),
         chip,
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
     );
     let title = if app.link_state == LinkState::Offline {
         "连接校园网络"
@@ -615,12 +674,14 @@ pub(super) unsafe fn paint_ui(hwnd: HWND, dc: HDC) {
     );
     hero::text(
         dc,
-        app.font,
+        app.font_label,
         p.text_secondary,
         r(30, 184, 420, 40),
         &app.status_detail,
         DT_WORDBREAK | DT_WORD_ELLIPSIS,
     );
+    // Full segmented-control track (outer corners live outside the button
+    // clips, so partial WM_DRAWITEM repaints cannot draw them).
     hero::surface(
         dc,
         r(30, layout::TABS_TOP, 420, 40),
@@ -632,11 +693,11 @@ pub(super) unsafe fn paint_ui(hwnd: HWND, dc: HDC) {
         for (top, name, icon) in [
             (layout::USER_TOP, "学号", Icon::User),
             (layout::PASS_TOP, "密码", Icon::Lock),
-            (layout::COMBO_TOP, "网络适配器", Icon::Network),
+            (layout::COMBO_TOP, "网络适配器", Icon::EthernetPort),
         ] {
             hero::text(
                 dc,
-                app.font,
+                app.font_medium,
                 p.text_primary,
                 r(30, top - 26, 420, 20),
                 name,
@@ -654,7 +715,11 @@ pub(super) unsafe fn paint_ui(hwnd: HWND, dc: HDC) {
                     r(30, top, 420, 44),
                     app.dpi,
                     p,
-                    !child.0.is_null() && focus == child,
+                    if !child.0.is_null() && focus == child {
+                        hero::FieldState::Focus
+                    } else {
+                        hero::FieldState::Normal
+                    },
                 );
                 hero::icon(dc, r(42, top + 13, 18, 18), p.text_secondary, icon);
                 if app.preview && child.0.is_null() {
@@ -685,39 +750,37 @@ pub(super) unsafe fn paint_ui(hwnd: HWND, dc: HDC) {
                 );
             }
         }
-    } else {
-        hero::surface(dc, r(30, 592, 420, 44), app.dpi, p.toggle_off, 12);
-        hero::icon(dc, r(44, 606, 16, 16), p.text_secondary, Icon::Info);
-        hero::text(
-            dc,
-            app.font,
-            p.text_secondary,
-            r(70, 592, 364, 44),
-            "偏好设置在连接或退出时保存。",
-            DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-        );
     }
     if app.buttons.is_empty() {
         for hit in BUTTONS {
-            paint_button(app, dc, hit);
+            paint_button(app, dc, hit, false);
         }
     }
     hero::line(dc, r(0, layout::FOOTER_TOP, CLIENT_W, 1), p.stroke);
-    hero::icon(dc, r(30, 690, 15, 15), p.text_secondary, Icon::Monitor);
+    hero::icon(dc, r(30, 691, 13, 13), p.text_secondary, Icon::Monitor);
     hero::text(
         dc,
-        app.font_label,
+        app.font_footer,
         p.text_secondary,
-        r(52, layout::FOOTER_TOP, 250, 48),
+        r(50, layout::FOOTER_TOP, 250, 48),
         "Windows 客户端",
         DT_SINGLELINE | DT_VCENTER,
     );
     hero::text(
         dc,
-        app.font_label,
+        app.font_footer,
         p.text_secondary,
         r(350, layout::FOOTER_TOP, 100, 48),
         concat!("v", env!("CARGO_PKG_VERSION")),
         DT_RIGHT | DT_SINGLELINE | DT_VCENTER,
     );
+    // 1 DIP window edge in place of the DWM frame/shadow WS_POPUP cannot show.
+    for edge in [
+        r(0, 0, CLIENT_W, 1),
+        r(0, CLIENT_H - 1, CLIENT_W, 1),
+        r(0, 0, 1, CLIENT_H),
+        r(CLIENT_W - 1, 0, 1, CLIENT_H),
+    ] {
+        hero::line(dc, edge, p.window_border);
+    }
 }

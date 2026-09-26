@@ -5,33 +5,33 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use drcom4scut_gui::install::UNINSTALL_MUTEX_NAME;
-use drcom4scut_gui::install::flow::{UninstallPlan, plan_uninstall};
+use drcom4scut_gui::install::flow::{plan_uninstall, UninstallPlan};
 use drcom4scut_gui::install::selfdelete;
 use drcom4scut_gui::install::ui;
+use drcom4scut_gui::install::UNINSTALL_MUTEX_NAME;
 use drcom4scut_gui::platform::{self, AlreadyRunning};
 use drcom4scut_gui::ui::hero::{self, Icon};
 use drcom4scut_gui::ui::winutil::*;
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::core::{w, PCWSTR};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DRAW_TEXT_FORMAT, DT_CENTER,
-    DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DeleteDC, DrawTextW, EndPaint, FillRect, HBRUSH, HDC,
-    HFONT, HGDIOBJ, InvalidateRect, MapWindowPoints, PAINTSTRUCT, PtInRect, SRCCOPY, SelectObject,
-    SetBkMode, SetTextColor, TRANSPARENT,
+    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DrawTextW, EndPaint,
+    FillRect, InvalidateRect, MapWindowPoints, PtInRect, SelectObject, SetBkMode, SetTextColor,
+    DRAW_TEXT_FORMAT, DT_CENTER, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK,
+    DT_WORD_ELLIPSIS, HBRUSH, HDC, HFONT, HGDIOBJ, PAINTSTRUCT, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{DRAWITEMSTRUCT, ODS_SELECTED};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    TRACKMOUSEEVENT, TRACKMOUSEEVENT_FLAGS, TrackMouseEvent,
+    TrackMouseEvent, TRACKMOUSEEVENT, TRACKMOUSEEVENT_FLAGS,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    ChildWindowFromPoint, DefWindowProcW, DestroyWindow, GWL_STYLE, GWLP_USERDATA, GetClientRect,
-    GetCursorPos, GetWindowLongPtrW, GetWindowLongPtrW as GetStyle, GetWindowRect, HTCAPTION,
-    IsWindowVisible, PostQuitMessage, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW,
-    SetWindowLongPtrW, SetWindowLongPtrW as SetStyle, SetWindowPos, WM_CLOSE, WM_COMMAND,
+    ChildWindowFromPoint, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos,
+    GetWindowLongPtrW, GetWindowLongPtrW as GetStyle, GetWindowRect, IsWindowVisible,
+    PostQuitMessage, SendMessageW, SetWindowLongPtrW, SetWindowLongPtrW as SetStyle, SetWindowPos,
+    GWLP_USERDATA, GWL_STYLE, HTCAPTION, SWP_NOACTIVATE, SWP_NOZORDER, WM_CLOSE, WM_COMMAND,
     WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND,
     WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCLBUTTONDOWN, WM_PAINT, WM_SETCURSOR, WM_SETTINGCHANGE,
 };
-use windows::core::{PCWSTR, w};
 
 const CLOSE: isize = 3003;
 const TME_LEAVE: TRACKMOUSEEVENT_FLAGS = TRACKMOUSEEVENT_FLAGS(0x2);
@@ -66,7 +66,7 @@ fn quote_arg(arg: &str) -> String {
 fn relaunch_elevated(args: &[String]) -> Result<(), String> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::WaitForSingleObject;
-    use windows::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
+    use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let exe_w: Vec<u16> = {
         use std::os::windows::ffi::OsStrExt;
@@ -161,7 +161,7 @@ fn cleanup_install(self_exe: &std::path::Path, origin_pid: u32) -> i32 {
     while origin_pid != 0 && std::time::Instant::now() < deadline {
         use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
         use windows::Win32::System::Threading::{
-            OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+            OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
         };
         unsafe {
             if let Ok(h) = OpenProcess(PROCESS_SYNCHRONIZE, false, origin_pid) {
@@ -251,11 +251,17 @@ struct UnUi {
     font: HFONT,
     small: HFONT,
     title: HFONT,
+    brand: HFONT,
+    chip: HFONT,
+    medium: HFONT,
+    heading: HFONT,
     background: HBRUSH,
     btn_ok: HWND,
     btn_cancel: HWND,
     btn_close: HWND,
     hot: isize,
+    confirm_open: bool,
+    modal_hot: i32,
 }
 
 unsafe fn invalidate_button(hwnd: HWND, s: &UnUi, id: isize) {
@@ -313,6 +319,10 @@ impl Drop for UnUi {
             font_as_gdi(self.font),
             font_as_gdi(self.small),
             font_as_gdi(self.title),
+            font_as_gdi(self.brand),
+            font_as_gdi(self.chip),
+            font_as_gdi(self.medium),
+            font_as_gdi(self.heading),
             brush_as_gdi(self.background),
         ] {
             delete_gdi(obj);
@@ -369,25 +379,29 @@ unsafe fn paint_action(dc: HDC, r: RECT, s: &UnUi, id: isize, hot: bool) {
         (
             "卸载",
             if hot { p.danger_hover } else { p.danger },
-            COLORREF(0xFFFFFF),
+            p.on_accent,
         )
     } else if id == CLOSE {
         (
             "×",
-            if hot { hero::soft(p, p.danger) } else { p.page },
-            p.text_primary,
+            if hot { p.danger_soft } else { p.page },
+            if hot { p.danger_text } else { p.text_secondary },
         )
     } else {
         (
             "取消",
-            if hot { p.stroke } else { p.toggle_off },
+            if hot { p.stroke_hover } else { p.toggle_off },
             p.text_primary,
         )
     };
-    hero::surface(dc, r, s.dpi, fill, 24);
+    if id == CLOSE {
+        hero::surface(dc, r, s.dpi, fill, 8);
+    } else {
+        hero::action_surface(dc, r, s.dpi, fill);
+    }
     draw_text(
         dc,
-        s.font,
+        s.medium,
         r,
         label,
         color,
@@ -404,24 +418,33 @@ unsafe fn paint_to_dc(dc: HDC, bounds: RECT, s: &UnUi) {
     let _ = FillRect(mem, &bounds, bg);
     delete_gdi(brush_as_gdi(bg));
     let r = |x, y, w, h| rect(s.dpi, x, y, w, h);
-    hero::line(mem, r(0, 47, 560, 1), palette.stroke);
-    hero::logo(mem, r(16, 11, 26, 26));
+    hero::line(
+        mem,
+        r(0, 47, 560, 1),
+        hero::mix(palette.page, palette.stroke, 55),
+    );
+    hero::logo(mem, r(16, 14, 20, 20));
     draw_text(
         mem,
-        s.small,
-        r(46, 0, 420, 48),
+        s.brand,
+        r(44, 0, 420, 48),
         "drcom4scut 卸载程序",
         palette.text_primary,
         DT_SINGLELINE | DT_VCENTER,
     );
-    hero::surface(
-        mem,
-        r(30, 78, 44, 44),
-        s.dpi,
-        hero::soft(palette, palette.danger),
-        14,
-    );
+    hero::surface(mem, r(30, 78, 44, 44), s.dpi, palette.danger_soft, 14);
     hero::icon(mem, r(41, 89, 22, 22), palette.danger_text, Icon::Trash);
+    hero::chip(
+        mem,
+        s.chip,
+        scale(530, s.dpi),
+        scale(87, s.dpi),
+        s.dpi,
+        palette.toggle_off,
+        palette.text_primary,
+        None,
+        "卸载客户端",
+    );
     draw_text(
         mem,
         s.title,
@@ -438,6 +461,15 @@ unsafe fn paint_to_dc(dc: HDC, bounds: RECT, s: &UnUi) {
         palette.text_secondary,
         DT_SINGLELINE,
     );
+    if !palette.is_dark {
+        hero::box_shadow(
+            mem,
+            r(30, 230, 500, 214),
+            s.dpi,
+            scale(24, s.dpi),
+            &hero::FIELD_SHADOW,
+        );
+    }
     hero::surface(mem, r(30, 230, 500, 214), s.dpi, palette.card, 24);
     for (i, (title, detail, icon)) in [
         ("账号与设置", "保存的账号、密码及客户端配置", Icon::User),
@@ -445,7 +477,7 @@ unsafe fn paint_to_dc(dc: HDC, bounds: RECT, s: &UnUi) {
         (
             "快捷方式与系统条目",
             "桌面、开始菜单快捷方式及卸载条目",
-            Icon::Monitor,
+            Icon::AppWindow,
         ),
     ]
     .into_iter()
@@ -455,16 +487,16 @@ unsafe fn paint_to_dc(dc: HDC, bounds: RECT, s: &UnUi) {
         hero::icon(mem, r(48, y + 14, 20, 20), palette.text_secondary, icon);
         draw_text(
             mem,
-            s.font,
-            r(82, y, 430, 25),
+            s.medium,
+            r(82, y + 1, 430, 22),
             title,
             palette.text_primary,
             DT_SINGLELINE,
         );
         draw_text(
             mem,
-            s.small,
-            r(82, y + 28, 430, 24),
+            s.chip,
+            r(82, y + 27, 430, 20),
             detail,
             palette.text_secondary,
             DT_SINGLELINE,
@@ -474,7 +506,12 @@ unsafe fn paint_to_dc(dc: HDC, bounds: RECT, s: &UnUi) {
         }
     }
     hero::surface(mem, r(30, 462, 500, 48), s.dpi, palette.toggle_off, 12);
-    hero::icon(mem, r(44, 477, 18, 18), palette.text_secondary, Icon::Check);
+    hero::icon(
+        mem,
+        r(44, 477, 18, 18),
+        palette.text_primary,
+        Icon::ShieldCheck,
+    );
     draw_text(
         mem,
         s.small,
@@ -483,14 +520,13 @@ unsafe fn paint_to_dc(dc: HDC, bounds: RECT, s: &UnUi) {
         palette.text_primary,
         DT_VCENTER | DT_SINGLELINE,
     );
-    hero::surface(
+    hero::surface(mem, r(30, 528, 500, 48), s.dpi, palette.danger_soft, 12);
+    hero::icon(
         mem,
-        r(30, 528, 500, 48),
-        s.dpi,
-        hero::soft(palette, palette.danger),
-        12,
+        r(44, 543, 18, 18),
+        palette.danger_text,
+        Icon::TriangleAlert,
     );
-    hero::icon(mem, r(44, 543, 18, 18), palette.danger_text, Icon::Info);
     draw_text(
         mem,
         s.small,
@@ -512,6 +548,9 @@ unsafe fn paint_to_dc(dc: HDC, bounds: RECT, s: &UnUi) {
         paint_action(mem, r(410, 616, 120, 40), s, ui::ID_OK, false);
         paint_action(mem, r(304, 616, 96, 40), s, ui::ID_CANCEL, false);
         paint_action(mem, r(516, 10, 28, 28), s, CLOSE, false);
+    }
+    if s.confirm_open {
+        paint_modal(mem, s);
     }
 
     let _ = BitBlt(
@@ -539,14 +578,117 @@ unsafe fn paint(hwnd: HWND, s: &UnUi) {
     let _ = EndPaint(hwnd, &ps);
 }
 
-fn begin_uninstall(hwnd: HWND) {
-    if !ui::confirm(
-        hwnd,
-        "确认卸载",
-        "将永久删除本次安装目录内的账号设置、配置、日志和已释放核心，并移除快捷方式与系统卸载条目。\n不会卸载系统中的 Npcap/WinPcap。\n\n确定卸载？",
-    ) {
-        return;
+/// Modal geometry in device px: (card, keep, delete). The safe action is
+/// left/first; Enter and Escape both resolve to it.
+fn modal_rects(dpi: u32) -> (RECT, RECT, RECT) {
+    (
+        rect(dpi, 94, 270, 372, 180),
+        rect(dpi, 210, 386, 112, 40),
+        rect(dpi, 330, 386, 112, 40),
+    )
+}
+
+fn point_in(r: &RECT, pt: POINT) -> bool {
+    pt.x >= r.left && pt.x < r.right && pt.y >= r.top && pt.y < r.bottom
+}
+
+/// Sketch `hu-modal-layer`: dim backdrop plus a centered confirmation card.
+unsafe fn paint_modal(dc: HDC, s: &UnUi) {
+    let p = Palette::for_dark(s.is_dark);
+    let overlay = rect(s.dpi, 0, 48, WIDTH, HEIGHT - 48);
+    let (rgb, opacity) = if s.is_dark {
+        (0x000000u32, 0.53)
+    } else {
+        (0x18181bu32, 0.33)
+    };
+    let svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="#{rgb:06x}" fill-opacity="{opacity}"/></svg>"##
+    );
+    if let Some(bmp) = drcom4scut_gui::ui::winutil::rasterize_svg(svg.as_bytes(), 8) {
+        drcom4scut_gui::ui::winutil::blit_svg(
+            dc,
+            &bmp,
+            overlay.left,
+            overlay.top,
+            overlay.right - overlay.left,
+            overlay.bottom - overlay.top,
+        );
     }
+    let (card, keep, del) = modal_rects(s.dpi);
+    hero::box_shadow(
+        dc,
+        card,
+        s.dpi,
+        scale(24, s.dpi),
+        &[(0, 12, 40, if s.is_dark { 0x60 } else { 0x30 })],
+    );
+    hero::surface(dc, card, s.dpi, p.card, 24);
+    draw_text(
+        dc,
+        s.heading,
+        rect(s.dpi, 118, 294, 324, 28),
+        "确认卸载？",
+        p.text_primary,
+        DT_SINGLELINE,
+    );
+    draw_text(
+        dc,
+        s.small,
+        rect(s.dpi, 118, 330, 324, 44),
+        "账号设置、配置和日志将一并删除。此操作无法撤销。",
+        p.text_secondary,
+        DT_WORDBREAK | DT_WORD_ELLIPSIS,
+    );
+    let keep_fill = if s.modal_hot == 1 {
+        p.stroke_hover
+    } else {
+        p.toggle_off
+    };
+    hero::action_surface(dc, keep, s.dpi, keep_fill);
+    draw_text(
+        dc,
+        s.medium,
+        keep,
+        "保留客户端",
+        p.text_primary,
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+    );
+    let del_fill = if s.modal_hot == 2 {
+        p.danger_hover
+    } else {
+        p.danger
+    };
+    hero::action_surface(dc, del, s.dpi, del_fill);
+    draw_text(
+        dc,
+        s.medium,
+        del,
+        "确认卸载",
+        p.on_accent,
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+    );
+}
+
+unsafe fn close_modal(hwnd: HWND, s: &mut UnUi) {
+    s.confirm_open = false;
+    s.modal_hot = 0;
+    let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(s.btn_ok, true);
+    let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(s.btn_cancel, true);
+    let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(s.btn_cancel));
+    let _ = InvalidateRect(Some(hwnd), None, false);
+}
+
+unsafe fn open_modal(hwnd: HWND, s: &mut UnUi) {
+    s.confirm_open = true;
+    s.modal_hot = 0;
+    let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(s.btn_ok, false);
+    let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(s.btn_cancel, false);
+    let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(hwnd));
+    let _ = InvalidateRect(Some(hwnd), None, false);
+}
+
+fn begin_uninstall(hwnd: HWND) {
+    // Confirmation happens in the in-window modal (sketch hu-modal-layer).
     match launch_cleanup() {
         Ok(()) => unsafe {
             let _ = DestroyWindow(hwnd);
@@ -561,7 +703,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         let is_dark = is_system_dark_mode();
         let font = create_font(14, dpi, false);
         let small = create_font(UI_CAPTION_SIZE, dpi, false);
-        let title = create_font(28, dpi, true);
+        let title = create_font_weight(28, dpi, 600);
+        let brand = create_font_weight(12, dpi, 600);
+        let chip = create_font(12, dpi, false);
+        let medium = create_font_weight(13, dpi, 500);
+        let heading = create_font_weight(20, dpi, 600);
         let btn_ok = owner_button(hwnd, ui::ID_OK, rect(dpi, 410, 616, 120, 40), "卸载", font);
         let btn_cancel = owner_button(
             hwnd,
@@ -580,11 +726,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             font,
             small,
             title,
+            brand,
+            chip,
+            medium,
+            heading,
             background: solid_brush(Palette::for_dark(is_dark).page),
             btn_ok,
             btn_cancel,
             btn_close,
             hot: 0,
+            confirm_open: false,
+            modal_hot: 0,
         });
         layout_controls(&state, dpi);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(state) as isize);
@@ -634,8 +786,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(1)
         }
         WM_COMMAND => {
+            if s.confirm_open {
+                return LRESULT(0);
+            }
             match (wparam.0 as u16) as isize {
-                ui::ID_OK | 1 => begin_uninstall(hwnd),
+                ui::ID_OK | 1 => open_modal(hwnd, s),
                 ui::ID_CANCEL | CLOSE | 2 => {
                     let _ = DestroyWindow(hwnd);
                 }
@@ -644,13 +799,35 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
-            if ((lparam.0 >> 16) & 0xffff) < scale(64, s.dpi) as isize {
+            if s.confirm_open {
+                let pt = POINT {
+                    x: (lparam.0 & 0xffff) as i16 as i32,
+                    y: ((lparam.0 >> 16) & 0xffff) as i16 as i32,
+                };
+                let (_, keep, del) = modal_rects(s.dpi);
+                if point_in(&keep, pt) {
+                    close_modal(hwnd, s);
+                } else if point_in(&del, pt) {
+                    close_modal(hwnd, s);
+                    begin_uninstall(hwnd);
+                }
+                return LRESULT(0);
+            }
+            // Drag by the 48-DIP title bar only, matching the main window.
+            if ((lparam.0 >> 16) & 0xffff) < scale(48, s.dpi) as isize {
                 let _ = SendMessageW(
                     hwnd,
                     WM_NCLBUTTONDOWN,
                     Some(WPARAM(HTCAPTION as usize)),
                     Some(lparam),
                 );
+            }
+            LRESULT(0)
+        }
+        m if m == windows::Win32::UI::WindowsAndMessaging::WM_KEYDOWN => {
+            // The safe action is the default: Enter and Escape keep the client.
+            if s.confirm_open && matches!(wparam.0, 13 | 27) {
+                close_modal(hwnd, s);
             }
             LRESULT(0)
         }
@@ -670,14 +847,24 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 s.dpi = new_dpi;
                 let new_font = create_font(14, new_dpi, false);
                 let new_small = create_font(UI_CAPTION_SIZE, new_dpi, false);
-                let new_title = create_font(28, new_dpi, true);
+                let new_title = create_font_weight(28, new_dpi, 600);
+                let new_brand = create_font_weight(12, new_dpi, 600);
+                let new_chip = create_font(12, new_dpi, false);
+                let new_medium = create_font_weight(13, new_dpi, 500);
+                let new_heading = create_font_weight(20, new_dpi, 600);
                 for child in [s.btn_ok, s.btn_cancel, s.btn_close] {
                     ui::apply_font(child, new_font);
                 }
-                let old_fonts = [s.font, s.small, s.title];
+                let old_fonts = [
+                    s.font, s.small, s.title, s.brand, s.chip, s.medium, s.heading,
+                ];
                 s.font = new_font;
                 s.small = new_small;
                 s.title = new_title;
+                s.brand = new_brand;
+                s.chip = new_chip;
+                s.medium = new_medium;
+                s.heading = new_heading;
                 for old in old_fonts {
                     delete_gdi(font_as_gdi(old));
                 }
@@ -691,6 +878,28 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 x: (lparam.0 & 0xffff) as i16 as i32,
                 y: ((lparam.0 >> 16) & 0xffff) as i16 as i32,
             };
+            if s.confirm_open {
+                let (_, keep, del) = modal_rects(s.dpi);
+                let hot = if point_in(&keep, pt) {
+                    1
+                } else if point_in(&del, pt) {
+                    2
+                } else {
+                    0
+                };
+                if hot != s.modal_hot {
+                    s.modal_hot = hot;
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
+                let mut tme = TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                let _ = TrackMouseEvent(&mut tme);
+                return LRESULT(0);
+            }
             let child = ChildWindowFromPoint(hwnd, pt);
             let hot = if child == s.btn_ok && IsWindowVisible(s.btn_ok).as_bool() {
                 ui::ID_OK
@@ -886,6 +1095,11 @@ mod tests {
                 std::env::var_os("DRCOM_UI_ARTIFACT_DIR").expect("set artifact directory"),
             );
             let _ = std::fs::create_dir_all(&out_dir);
+            let save = |canvas: &TestCanvas, name: String| {
+                let path = out_dir.join(name);
+                canvas.save_png(&path);
+                golden_review(&path);
+            };
 
             for (mode_name, is_dark) in [("light", false), ("dark", true)] {
                 for dpi in [96, 120, 144, 192] {
@@ -900,24 +1114,37 @@ mod tests {
 
                     let font = create_font(14, dpi, false);
                     let small = create_font(UI_CAPTION_SIZE, dpi, false);
-                    let title = create_font(28, dpi, true);
+                    let title = create_font_weight(28, dpi, 600);
+                    let brand = create_font_weight(12, dpi, 600);
+                    let chip = create_font(12, dpi, false);
+                    let medium = create_font_weight(13, dpi, 500);
+                    let heading = create_font_weight(20, dpi, 600);
 
-                    let state = UnUi {
+                    let mut state = UnUi {
                         is_dark,
                         dpi,
                         font,
                         small,
                         title,
+                        brand,
+                        chip,
+                        medium,
+                        heading,
                         background: solid_brush(Palette::for_dark(is_dark).page),
                         btn_ok: HWND::default(),
                         btn_cancel: HWND::default(),
                         btn_close: HWND::default(),
                         hot: 0,
+                        confirm_open: false,
+                        modal_hot: 0,
                     };
 
                     let canvas = TestCanvas::new(w, h);
                     paint_to_dc(canvas.dc, bounds, &state);
-                    canvas.save_png(&out_dir.join(format!("uninstall-{mode_name}-{dpi}dpi.png")));
+                    save(&canvas, format!("uninstall-{mode_name}-{dpi}dpi.png"));
+                    state.confirm_open = true;
+                    paint_to_dc(canvas.dc, bounds, &state);
+                    save(&canvas, format!("uninstall-{mode_name}-{dpi}dpi-modal.png"));
                 }
             }
         }

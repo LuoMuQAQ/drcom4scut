@@ -1,11 +1,10 @@
 //! Setup-only window. All privileged work runs outside the UI thread.
 use drcom4scut_gui::{
     install::{
-        GUI_EXE_NAME,
         driver::{self, DriverStatus},
         driver_flow,
         flow::{self, InstallOptions, InstallResult},
-        knownfolder, origin, ui,
+        knownfolder, origin, ui, GUI_EXE_NAME,
     },
     ui::hero::{self, Icon},
     ui::winutil::{self, *},
@@ -15,18 +14,18 @@ use std::{
     sync::mpsc::{self, Receiver},
 };
 use windows::{
+    core::{w, PCWSTR},
     Win32::{
         Foundation::*,
         Graphics::Gdi::*,
         UI::{
             Controls::{DRAWITEMSTRUCT, ODS_SELECTED},
             Input::KeyboardAndMouse::{
-                EnableWindow, SetFocus, TRACKMOUSEEVENT, TRACKMOUSEEVENT_FLAGS, TrackMouseEvent,
+                EnableWindow, SetFocus, TrackMouseEvent, TRACKMOUSEEVENT, TRACKMOUSEEVENT_FLAGS,
             },
             WindowsAndMessaging::*,
         },
     },
-    core::{PCWSTR, w},
 };
 
 const PRIMARY: isize = 3001;
@@ -46,6 +45,10 @@ pub(crate) struct State {
     pub(crate) font: HFONT,
     pub(crate) small: HFONT,
     pub(crate) title: HFONT,
+    pub(crate) brand: HFONT,
+    pub(crate) chip: HFONT,
+    pub(crate) medium: HFONT,
+    pub(crate) heading: HFONT,
     pub(crate) card: HBRUSH,
     pub(crate) field: HBRUSH,
     pub(crate) controls: Vec<HWND>,
@@ -74,6 +77,10 @@ impl Drop for State {
             font_as_gdi(self.font),
             font_as_gdi(self.small),
             font_as_gdi(self.title),
+            font_as_gdi(self.brand),
+            font_as_gdi(self.chip),
+            font_as_gdi(self.medium),
+            font_as_gdi(self.heading),
             brush_as_gdi(self.card),
             brush_as_gdi(self.field),
         ] {
@@ -155,7 +162,11 @@ unsafe fn init(hwnd: HWND) -> State {
     let dpi = window_dpi(hwnd);
     let font = create_font(14, dpi, false);
     let small = create_font(UI_CAPTION_SIZE, dpi, false);
-    let title = create_font(28, dpi, true);
+    let title = winutil::create_font_weight(28, dpi, 600);
+    let brand = winutil::create_font_weight(12, dpi, 600);
+    let chip = create_font(12, dpi, false);
+    let medium = winutil::create_font_weight(13, dpi, 500);
+    let heading = winutil::create_font_weight(14, dpi, 600);
     let mut options = InstallOptions::default();
     if let Ok(pf) = knownfolder::program_files() {
         options.install_dir = pf.join("drcom4scutGUI");
@@ -241,6 +252,10 @@ unsafe fn init(hwnd: HWND) -> State {
         font,
         small,
         title,
+        brand,
+        chip,
+        medium,
+        heading,
         card: solid_brush(palette.card),
         field: solid_brush(palette.control),
         controls: vec![path, browse, desktop, menu, launch],
@@ -291,41 +306,49 @@ pub(crate) unsafe fn paint_to_dc(dc: HDC, bounds: RECT, s: &State) {
     let _ = FillRect(mem, &bounds, bg);
     delete_gdi(brush_as_gdi(bg));
     let r = |x, y, w, h| rect(s.dpi, x, y, w, h);
-    hero::line(mem, r(0, 47, 560, 1), palette.stroke);
-    hero::logo(mem, r(16, 11, 26, 26));
+    hero::line(
+        mem,
+        r(0, 47, 560, 1),
+        hero::mix(palette.page, palette.stroke, 55),
+    );
+    hero::logo(mem, r(16, 14, 20, 20));
     text(
         mem,
-        s.small,
-        r(46, 0, 420, 48),
+        s.brand,
+        r(44, 0, 420, 48),
         "drcom4scut 安装程序",
         palette.text_primary,
         DT_SINGLELINE | DT_VCENTER,
     );
-    hero::surface(
-        mem,
-        r(30, 78, 44, 44),
-        s.dpi,
-        hero::soft(palette, palette.accent),
-        14,
-    );
-    hero::icon(
-        mem,
-        r(41, 89, 22, 22),
-        palette.accent,
-        if s.page == Page::Finished {
-            Icon::Info
+    if s.page != Page::Finished {
+        hero::surface(mem, r(30, 78, 44, 44), s.dpi, palette.accent_soft, 14);
+        hero::icon(
+            mem,
+            r(41, 89, 22, 22),
+            palette.accent,
+            if s.page == Page::Running {
+                Icon::PackageOpen
+            } else {
+                Icon::Download
+            },
+        );
+        let caption = if s.page == Page::Running {
+            "正在安装".to_string()
         } else {
-            Icon::Download
-        },
-    );
-    text(
-        mem,
-        s.small,
-        r(320, 84, 210, 28),
-        &format!("Windows x64 · {}", env!("CARGO_PKG_VERSION")),
-        palette.text_secondary,
-        DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
-    );
+            format!("Windows x64 · {}", env!("CARGO_PKG_VERSION"))
+        };
+        hero::chip(
+            mem,
+            s.chip,
+            scale(530, s.dpi),
+            scale(87, s.dpi),
+            s.dpi,
+            palette.toggle_off,
+            palette.text_primary,
+            None,
+            &caption,
+        );
+    }
     if s.page == Page::Configure {
         text(
             mem,
@@ -345,16 +368,28 @@ pub(crate) unsafe fn paint_to_dc(dc: HDC, bounds: RECT, s: &State) {
         );
         text(
             mem,
-            s.font,
+            s.heading,
             r(30, 234, 500, 24),
             "安装位置",
             palette.text_primary,
             DT_SINGLELINE,
         );
-        hero::field(mem, r(30, 264, 414, 44), s.dpi, palette, false);
+        let path_focused = !s.path.0.is_null()
+            && unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() == s.path };
+        hero::field(
+            mem,
+            r(30, 264, 414, 44),
+            s.dpi,
+            palette,
+            if path_focused {
+                hero::FieldState::Focus
+            } else {
+                hero::FieldState::Normal
+            },
+        );
         text(
             mem,
-            s.font,
+            s.heading,
             r(30, 334, 500, 24),
             "安装选项",
             palette.text_primary,
@@ -363,20 +398,19 @@ pub(crate) unsafe fn paint_to_dc(dc: HDC, bounds: RECT, s: &State) {
         for y in [412, 464] {
             hero::line(mem, r(30, y, 500, 1), palette.stroke);
         }
-        hero::surface(
+        hero::surface(mem, r(30, 530, 500, 66), s.dpi, palette.accent_soft, 12);
+        hero::icon(
             mem,
-            r(30, 530, 500, 66),
-            s.dpi,
-            hero::soft(palette, palette.accent),
-            12,
+            r(44, 546, 18, 18),
+            palette.accent_text,
+            Icon::ShieldCheck,
         );
-        hero::icon(mem, r(44, 546, 18, 18), palette.accent, Icon::Info);
         text(
             mem,
             s.small,
             r(72, 540, 442, 46),
             &s.driver_text,
-            palette.text_primary,
+            palette.accent_text,
             DT_WORDBREAK | DT_WORD_ELLIPSIS,
         );
         let note = if s.message.is_empty() {
@@ -396,10 +430,23 @@ pub(crate) unsafe fn paint_to_dc(dc: HDC, bounds: RECT, s: &State) {
             },
             DT_WORDBREAK | DT_WORD_ELLIPSIS,
         );
-    } else {
-        let heading = if s.page == Page::Running {
-            "正在准备客户端"
-        } else if let Some(result) = &s.result {
+    } else if s.page == Page::Finished {
+        let (icon_bg, icon_fg, symbol) = if s.result.as_ref().is_none_or(|r| !r.ok) {
+            (
+                palette.danger_soft,
+                palette.danger_text,
+                Icon::TriangleAlert,
+            )
+        } else if s
+            .result
+            .as_ref()
+            .is_some_and(|r| r.need_reboot || !driver_flow::ready(&r.driver))
+        {
+            (palette.warning_soft, palette.warning_text, Icon::Info)
+        } else {
+            (palette.success_soft, palette.success_text, Icon::Check)
+        };
+        let heading = if let Some(result) = &s.result {
             if !result.ok {
                 "安装未完成"
             } else if result.need_reboot {
@@ -412,11 +459,47 @@ pub(crate) unsafe fn paint_to_dc(dc: HDC, bounds: RECT, s: &State) {
         } else {
             "安装未完成"
         };
+        hero::surface(mem, r(254, 132, 52, 52), s.dpi, icon_bg, 14);
+        hero::icon(mem, r(267, 145, 26, 26), icon_fg, symbol);
+        text(
+            mem,
+            s.title,
+            r(30, 204, 500, 40),
+            heading,
+            palette.text_primary,
+            DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
+        text(
+            mem,
+            s.small,
+            r(60, 250, 440, 48),
+            &s.message,
+            palette.text_secondary,
+            DT_CENTER | DT_WORDBREAK | DT_WORD_ELLIPSIS,
+        );
+        hero::surface(mem, r(30, 318, 500, 64), s.dpi, palette.toggle_off, 12);
+        text(
+            mem,
+            s.chip,
+            r(44, 330, 472, 40),
+            &format!("安装位置\n{}", s.options.install_dir.display()),
+            palette.text_secondary,
+            DT_WORDBREAK | DT_WORD_ELLIPSIS,
+        );
+        text(
+            mem,
+            s.small,
+            r(30, 568, 500, 60),
+            "可以通过 Windows“已安装的应用”卸载本程序。",
+            palette.text_secondary,
+            DT_WORDBREAK | DT_WORD_ELLIPSIS,
+        );
+    } else {
         text(
             mem,
             s.title,
             r(30, 144, 500, 42),
-            heading,
+            "正在准备客户端",
             palette.text_primary,
             DT_SINGLELINE | DT_END_ELLIPSIS,
         );
@@ -454,35 +537,41 @@ pub(crate) unsafe fn paint_to_dc(dc: HDC, bounds: RECT, s: &State) {
             palette.text_secondary,
             DT_SINGLELINE | DT_RIGHT,
         );
-        hero::surface(mem, r(30, 452, 500, 80), s.dpi, palette.card, 24);
+        hero::surface(mem, r(30, 452, 500, 64), s.dpi, palette.toggle_off, 12);
         text(
             mem,
-            s.small,
-            r(46, 466, 468, 56),
+            s.chip,
+            r(44, 464, 472, 40),
             &format!("安装位置\n{}", s.options.install_dir.display()),
             palette.text_secondary,
             DT_WORDBREAK | DT_WORD_ELLIPSIS,
         );
-        let note = if s.page == Page::Running {
-            "请保持窗口打开。Npcap 安装时可能需要在官方窗口确认。"
-        } else {
-            "可以通过 Windows“已安装的应用”卸载本程序。"
-        };
         text(
             mem,
             s.small,
             r(30, 568, 500, 60),
-            note,
+            "请保持窗口打开。Npcap 安装时可能需要在官方窗口确认。",
             palette.text_secondary,
             DT_WORDBREAK | DT_WORD_ELLIPSIS,
         );
     }
     hero::line(mem, r(0, 656, 560, 1), palette.stroke);
+    let footer = if s.page == Page::Finished {
+        if s.result.as_ref().is_some_and(|r| r.ok) {
+            "安装成功"
+        } else {
+            "安装未完成"
+        }
+    } else if s.page == Page::Running {
+        "请稍候"
+    } else {
+        "安装到这台电脑"
+    };
     text(
         mem,
         s.small,
         r(30, 672, 200, 40),
-        "安装到这台电脑",
+        footer,
         palette.text_secondary,
         DT_SINGLELINE | DT_VCENTER,
     );
@@ -515,7 +604,7 @@ unsafe fn refresh(hwnd: HWND) {
 }
 /// Shell elevation is required to open the client's requireAdministrator manifest.
 unsafe fn launch_client(owner: HWND, dir: &std::path::Path) -> Result<(), String> {
-    use windows::Win32::UI::Shell::{SHELLEXECUTEINFOW, ShellExecuteExW};
+    use windows::Win32::UI::Shell::{ShellExecuteExW, SHELLEXECUTEINFOW};
     let executable = wide(&dir.join(GUI_EXE_NAME).to_string_lossy());
     let workdir = wide(&dir.to_string_lossy());
     let mut info = SHELLEXECUTEINFOW {
@@ -767,64 +856,56 @@ pub(crate) unsafe extern "system" fn wndproc(
                 let _ = FillRect(dc, &d.rcItem, background);
                 delete_gdi(brush_as_gdi(background));
                 let accent = d.CtlID == PRIMARY as u32;
+                let close = d.CtlID == CLOSE as u32;
                 let hot = s.hot == d.CtlID as isize;
+                let pressed = d.itemState.0 & ODS_SELECTED.0 != 0;
                 let disabled =
                     !windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(d.hwndItem)
                         .as_bool();
-                let fill = if disabled {
-                    palette.disabled_bg
-                } else if accent {
-                    if d.itemState.0 & ODS_SELECTED.0 != 0 {
+                let (fill, caption) = if accent {
+                    let fill = if disabled {
+                        hero::mix(palette.page, palette.accent, 50)
+                    } else if pressed {
                         palette.accent_active
                     } else if hot {
                         palette.accent_hover
                     } else {
                         palette.accent
+                    };
+                    let caption = if disabled {
+                        hero::mix(fill, palette.on_accent, 50)
+                    } else {
+                        palette.on_accent
+                    };
+                    (fill, caption)
+                } else if close {
+                    if hot {
+                        (palette.danger_soft, palette.danger_text)
+                    } else {
+                        (palette.page, palette.text_secondary)
                     }
-                } else if d.CtlID == CLOSE as u32 {
-                    if hot { palette.danger } else { palette.page }
                 } else {
-                    if d.itemState.0 & ODS_SELECTED.0 != 0 || hot {
-                        if s.is_dark {
-                            palette.stroke_hover
-                        } else {
-                            palette.stroke
-                        }
+                    // Secondary actions: filled capsule, no border (v3 default).
+                    let fill = if disabled {
+                        palette.disabled_bg
+                    } else if pressed || hot {
+                        palette.stroke_hover
                     } else {
-                        if d.CtlID == ui::ID_BROWSE as u32 {
-                            palette.control
-                        } else {
-                            palette.card
-                        }
-                    }
+                        palette.toggle_off
+                    };
+                    (fill, palette.text_primary)
                 };
-                fill_round(
-                    dc,
-                    d.rcItem,
-                    scale(24, s.dpi),
-                    fill,
-                    if accent {
-                        None
-                    } else if d.CtlID == CLOSE as u32 {
-                        None
-                    } else if hot {
-                        Some(palette.stroke_hover)
-                    } else {
-                        Some(palette.stroke)
-                    },
-                );
+                if close {
+                    hero::surface_ex(dc, d.rcItem, s.dpi, fill, 8, None);
+                } else {
+                    hero::action_surface(dc, d.rcItem, s.dpi, fill);
+                }
                 text(
                     dc,
-                    s.font,
+                    s.medium,
                     d.rcItem,
                     &ui::edit_text(d.hwndItem),
-                    if disabled {
-                        palette.text_secondary
-                    } else if accent || (d.CtlID == CLOSE as u32 && hot) {
-                        COLORREF(0x00FFFFFF)
-                    } else {
-                        palette.text_primary
-                    },
+                    caption,
                     DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                 );
             });
@@ -875,7 +956,8 @@ pub(crate) unsafe extern "system" fn wndproc(
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
-            if ((lp.0 >> 16) & 0xffff) < scale(100, s.dpi) as isize {
+            // Drag by the 48-DIP title bar only, matching the main window.
+            if ((lp.0 >> 16) & 0xffff) < scale(48, s.dpi) as isize {
                 let _ = SendMessageW(
                     hwnd,
                     WM_NCLBUTTONDOWN,
@@ -918,7 +1000,11 @@ pub(crate) unsafe extern "system" fn wndproc(
                 s.dpi = new_dpi;
                 let new_font = create_font(14, new_dpi, false);
                 let new_small = create_font(UI_CAPTION_SIZE, new_dpi, false);
-                let new_title = create_font(28, new_dpi, true);
+                let new_title = winutil::create_font_weight(28, new_dpi, 600);
+                let new_brand = winutil::create_font_weight(12, new_dpi, 600);
+                let new_chip = create_font(12, new_dpi, false);
+                let new_medium = winutil::create_font_weight(13, new_dpi, 500);
+                let new_heading = winutil::create_font_weight(14, new_dpi, 600);
                 for child in [
                     s.path,
                     s.browse,
@@ -931,10 +1017,16 @@ pub(crate) unsafe extern "system" fn wndproc(
                 ] {
                     ui::apply_font(child, new_font);
                 }
-                let old_fonts = [s.font, s.small, s.title];
+                let old_fonts = [
+                    s.font, s.small, s.title, s.brand, s.chip, s.medium, s.heading,
+                ];
                 s.font = new_font;
                 s.small = new_small;
                 s.title = new_title;
+                s.brand = new_brand;
+                s.chip = new_chip;
+                s.medium = new_medium;
+                s.heading = new_heading;
                 for old in old_fonts {
                     delete_gdi(font_as_gdi(old));
                 }

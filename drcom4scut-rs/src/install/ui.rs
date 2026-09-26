@@ -2,20 +2,18 @@
 
 use std::path::PathBuf;
 
+use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::Graphics::Gdi::{SetBkMode, SetTextColor, TRANSPARENT, TextOutW};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DispatchMessageW, GetMessageW, GetWindowTextW, HMENU,
-    IDC_ARROW, LoadCursorW, LoadIconW, MB_ICONWARNING, MB_OK, MB_OKCANCEL, MSG, MessageBoxW,
-    RegisterClassW, SendMessageW, SetWindowTextW, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_SETFONT, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_EX_APPWINDOW, WS_POPUP, WS_SYSMENU,
-    WS_TABSTOP, WS_VISIBLE,
+    CreateWindowExW, DispatchMessageW, GetMessageW, GetWindowTextW, LoadCursorW, LoadIconW,
+    MessageBoxW, RegisterClassW, SendMessageW, SetWindowTextW, TranslateMessage, CS_HREDRAW,
+    CS_VREDRAW, HMENU, IDC_ARROW, MB_ICONWARNING, MB_OK, MB_OKCANCEL, MSG, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_SETFONT, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_EX_APPWINDOW, WS_POPUP,
+    WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
-use windows::core::{PCWSTR, w};
 
-use crate::install::{APP_DISPLAY_NAME, APP_VERSION};
-use crate::ui::winutil::{self, COLOR_TEXT_PRIMARY, COLOR_TEXT_SECONDARY, scale, wide};
+use crate::ui::winutil::{self, scale, wide};
 
 pub const ID_PATH: isize = 2001;
 pub const ID_BROWSE: isize = 2002;
@@ -55,12 +53,12 @@ pub fn alert(hwnd: HWND, title: &str, text: &str) {
 
 pub fn pick_directory(owner: HWND, current: &str) -> Option<PathBuf> {
     use windows::Win32::System::Com::{
-        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
-        CoUninitialize,
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
     };
     use windows::Win32::UI::Shell::{
-        FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, IShellItem,
-        SHCreateItemFromParsingName, SIGDN_FILESYSPATH,
+        FileOpenDialog, IFileOpenDialog, IShellItem, SHCreateItemFromParsingName,
+        FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
     };
     unsafe {
         struct ComGuard;
@@ -105,37 +103,6 @@ pub fn run_message_loop(hwnd: HWND) {
             DispatchMessageW(&msg);
         }
         let _ = hwnd;
-    }
-}
-
-pub fn create_child_edit(
-    parent: HWND,
-    id: isize,
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    text: &str,
-) -> HWND {
-    unsafe {
-        let hwnd = CreateWindowExW(
-            WINDOW_EX_STYLE(0x200), // WS_EX_CLIENTEDGE
-            w!("EDIT"),
-            PCWSTR::null(),
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | 0x80), // ES_AUTOHSCROLL
-            x,
-            y,
-            w,
-            h,
-            Some(parent),
-            Some(HMENU(id as *mut _)),
-            None,
-            None,
-        )
-        .unwrap_or_default();
-        let t = wide(text);
-        let _ = SetWindowTextW(hwnd, PCWSTR(t.as_ptr()));
-        hwnd
     }
 }
 
@@ -303,27 +270,6 @@ pub fn apply_font(hwnd: HWND, font: windows::Win32::Graphics::Gdi::HFONT) {
             Some(LPARAM(1)),
         );
     }
-}
-
-pub fn paint_header(
-    hdc: windows::Win32::Graphics::Gdi::HDC,
-    title: &str,
-    subtitle: &str,
-    dpi: u32,
-) {
-    unsafe {
-        let _ = SetBkMode(hdc, TRANSPARENT);
-        let _ = SetTextColor(hdc, COLOR_TEXT_PRIMARY);
-        let t: Vec<u16> = title.encode_utf16().collect();
-        let _ = TextOutW(hdc, scale(20, dpi), scale(16, dpi), &t);
-        let _ = SetTextColor(hdc, COLOR_TEXT_SECONDARY);
-        let s: Vec<u16> = subtitle.encode_utf16().collect();
-        let _ = TextOutW(hdc, scale(20, dpi), scale(40, dpi), &s);
-    }
-}
-
-pub fn window_title() -> String {
-    format!("{APP_DISPLAY_NAME} {APP_VERSION}")
 }
 
 /// 居中弹出无边框窗口，配色与主界面一致。

@@ -485,7 +485,11 @@ mod tests {
             dpi,
             font: create_font(14, dpi, false),
             small: create_font(UI_CAPTION_SIZE, dpi, false),
-            title: create_font(28, dpi, true),
+            title: create_font_weight(28, dpi, 600),
+            brand: create_font_weight(12, dpi, 600),
+            chip: create_font(12, dpi, false),
+            medium: create_font_weight(13, dpi, 500),
+            heading: create_font_weight(14, dpi, 600),
             card: solid_brush(palette.card),
             field: solid_brush(palette.control),
             controls: Vec::new(),
@@ -538,6 +542,11 @@ mod tests {
                 std::env::var_os("DRCOM_UI_ARTIFACT_DIR").expect("set artifact directory"),
             );
             let _ = std::fs::create_dir_all(&out_dir);
+            let save = |canvas: &TestCanvas, name: String| {
+                let path = out_dir.join(name);
+                canvas.save_png(&path);
+                golden_review(&path);
+            };
 
             for (mode_name, is_dark) in [("light", false), ("dark", true)] {
                 for dpi in [96, 120, 144, 192] {
@@ -553,15 +562,14 @@ mod tests {
 
                     let canvas = TestCanvas::new(w, h);
                     print_children(&canvas, parent, &state);
-                    canvas.save_png(
-                        &out_dir.join(format!("setup-{mode_name}-{dpi}dpi-configure.png")),
-                    );
+                    save(&canvas, format!("setup-{mode_name}-{dpi}dpi-configure.png"));
 
                     state.message = "安装位置不可写，请选择其他文件夹。".into();
                     let canvas = TestCanvas::new(w, h);
                     print_children(&canvas, parent, &state);
-                    canvas.save_png(
-                        &out_dir.join(format!("setup-{mode_name}-{dpi}dpi-configure-error.png")),
+                    save(
+                        &canvas,
+                        format!("setup-{mode_name}-{dpi}dpi-configure-error.png"),
                     );
                     state.message.clear();
 
@@ -576,8 +584,7 @@ mod tests {
                     let _ = SetWindowTextW(state.primary, PCWSTR(wide("正在安装…").as_ptr()));
                     let canvas = TestCanvas::new(w, h);
                     print_children(&canvas, parent, &state);
-                    canvas
-                        .save_png(&out_dir.join(format!("setup-{mode_name}-{dpi}dpi-running.png")));
+                    save(&canvas, format!("setup-{mode_name}-{dpi}dpi-running.png"));
 
                     // 3. Finished (Success)
                     state.page = setup_window::Page::Finished;
@@ -597,8 +604,9 @@ mod tests {
                     let _ = SetWindowTextW(state.secondary, PCWSTR(wide("关闭").as_ptr()));
                     let canvas = TestCanvas::new(w, h);
                     print_children(&canvas, parent, &state);
-                    canvas.save_png(
-                        &out_dir.join(format!("setup-{mode_name}-{dpi}dpi-finished-success.png")),
+                    save(
+                        &canvas,
+                        format!("setup-{mode_name}-{dpi}dpi-finished-success.png"),
                     );
 
                     // 4. Finished (Driver retry)
@@ -615,9 +623,10 @@ mod tests {
                     let _ = SetWindowTextW(state.primary, PCWSTR(wide("重试驱动").as_ptr()));
                     let canvas = TestCanvas::new(w, h);
                     print_children(&canvas, parent, &state);
-                    canvas.save_png(&out_dir.join(format!(
-                        "setup-{mode_name}-{dpi}dpi-finished-driver-retry.png"
-                    )));
+                    save(
+                        &canvas,
+                        format!("setup-{mode_name}-{dpi}dpi-finished-driver-retry.png"),
+                    );
 
                     // 5. Finished (Reboot needed)
                     state.result = Some(flow::InstallResult {
@@ -633,8 +642,9 @@ mod tests {
                     let _ = SetWindowTextW(state.primary, PCWSTR(wide("完成").as_ptr()));
                     let canvas = TestCanvas::new(w, h);
                     print_children(&canvas, parent, &state);
-                    canvas.save_png(
-                        &out_dir.join(format!("setup-{mode_name}-{dpi}dpi-finished-reboot.png")),
+                    save(
+                        &canvas,
+                        format!("setup-{mode_name}-{dpi}dpi-finished-reboot.png"),
                     );
 
                     // 6. Finished (Failed)
@@ -651,8 +661,9 @@ mod tests {
                     let _ = SetWindowTextW(state.primary, PCWSTR(wide("返回设置").as_ptr()));
                     let canvas = TestCanvas::new(w, h);
                     print_children(&canvas, parent, &state);
-                    canvas.save_png(
-                        &out_dir.join(format!("setup-{mode_name}-{dpi}dpi-finished-failed.png")),
+                    save(
+                        &canvas,
+                        format!("setup-{mode_name}-{dpi}dpi-finished-failed.png"),
                     );
                     SetWindowLongPtrW(parent, GWLP_USERDATA, 0);
                     SetWindowLongPtrW(parent, GWLP_WNDPROC, old_proc);

@@ -59,11 +59,24 @@ unsafe fn apply(hwnd: HWND, display_dpi: u32, anchor: RECT, work: RECT) {
     app.combo_hot = -1;
     if dpi != app.dpi {
         app.dpi = dpi;
-        let old_fonts = [app.font, app.font_title, app.font_label, app.font_btn];
+        let old_fonts = [
+            app.font,
+            app.font_title,
+            app.font_label,
+            app.font_btn,
+            app.font_medium,
+            app.font_chip,
+            app.font_brand,
+            app.font_footer,
+        ];
         app.font = create_font(14, dpi, false);
-        app.font_title = create_font(28, dpi, true);
+        app.font_title = winutil::create_font_weight(28, dpi, 600);
         app.font_label = create_font(layout::CAPTION_SIZE, dpi, false);
         app.font_btn = create_font(14, dpi, true);
+        app.font_medium = winutil::create_font_weight(13, dpi, 500);
+        app.font_chip = create_font(12, dpi, false);
+        app.font_brand = winutil::create_font_weight(12, dpi, 600);
+        app.font_footer = create_font(11, dpi, false);
         app.logo_title = winutil::rasterize_app_svg(app.s(52).max(1) as u32);
         app.logo_status = winutil::rasterize_app_svg(app.s(152).max(1) as u32);
         let eye_color = winutil::Palette::for_dark(app.is_dark).text_secondary;

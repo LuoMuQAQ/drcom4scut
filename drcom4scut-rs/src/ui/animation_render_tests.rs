@@ -70,14 +70,18 @@ impl Scene {
         app.page_brush = solid_brush(palette.page);
         app.card_brush = solid_brush(palette.card);
         app.control_brush = solid_brush(palette.control);
-        for (font, size, bold) in [
-            (&mut app.font, 14, false),
-            (&mut app.font_title, 28, true),
-            (&mut app.font_label, layout::CAPTION_SIZE, false),
-            (&mut app.font_btn, 14, true),
+        for (font, size, weight) in [
+            (&mut app.font, 14, 400),
+            (&mut app.font_title, 28, 600),
+            (&mut app.font_label, layout::CAPTION_SIZE, 400),
+            (&mut app.font_btn, 14, 500),
+            (&mut app.font_medium, 13, 500),
+            (&mut app.font_chip, 12, 400),
+            (&mut app.font_brand, 12, 600),
+            (&mut app.font_footer, 11, 400),
         ] {
             delete_gdi(font_as_gdi(*font));
-            *font = create_font(size, dpi, bold);
+            *font = winutil::create_font_weight(size, dpi, weight);
         }
         app.adapters = vec![Adapter {
             id: "fixture".into(),
@@ -437,6 +441,11 @@ fn render_heroui_main_window_snapshots() {
             std::env::var_os("DRCOM_UI_ARTIFACT_DIR").expect("set artifact directory"),
         );
         std::fs::create_dir_all(&out).unwrap();
+        let save = |canvas: &Canvas, name: String| {
+            let path = out.join(name);
+            canvas.save_png(&path);
+            winutil::golden_review(&path);
+        };
         for (theme, dark) in [("light", false), ("dark", true)] {
             for dpi in [96, 120, 144, 192] {
                 for (name, state, title, detail, desired) in [
@@ -496,11 +505,11 @@ fn render_heroui_main_window_snapshots() {
                     let full = scene.full();
                     let canvas = Canvas::new(full.right, full.bottom);
                     scene.render_native(&canvas);
-                    canvas.save_png(&out.join(format!("main-{theme}-{dpi}dpi-{name}.png")));
+                    save(&canvas, format!("main-{theme}-{dpi}dpi-{name}.png"));
                     if name == "offline" {
                         v3::switch_page(scene.hwnd, true);
                         scene.render_native(&canvas);
-                        canvas.save_png(&out.join(format!("main-{theme}-{dpi}dpi-settings.png")));
+                        save(&canvas, format!("main-{theme}-{dpi}dpi-settings.png"));
                         v3::switch_page(scene.hwnd, false);
                         scene.app.combo_sel = 1;
                         let combo = scene
@@ -517,17 +526,25 @@ fn render_heroui_main_window_snapshots() {
                             scene.app.combo_open = open;
                             scene.app.combo_visual = Anim::snap(if open { 1.0 } else { 0.0 });
                             scene.render_native(&canvas);
-                            canvas.save_png(
-                                &out.join(format!("main-{theme}-{dpi}dpi-{variant}.png")),
-                            );
+                            save(&canvas, format!("main-{theme}-{dpi}dpi-{variant}.png"));
                         }
                         click_background(&scene);
                         // Capture the settled state after the popup's closing fade.
                         scene.app.combo_visual = Anim::snap(0.0);
                         scene.render_native(&canvas);
-                        canvas.save_png(
-                            &out.join(format!("main-{theme}-{dpi}dpi-background-click.png")),
+                        save(
+                            &canvas,
+                            format!("main-{theme}-{dpi}dpi-background-click.png"),
                         );
+                        // Hover states: combo field and primary action.
+                        for (variant, hit) in
+                            [("combo-hover", Hit::Combo), ("connect-hover", Hit::Connect)]
+                        {
+                            scene.app.hover = hit;
+                            scene.render_native(&canvas);
+                            save(&canvas, format!("main-{theme}-{dpi}dpi-{variant}.png"));
+                        }
+                        scene.app.hover = Hit::None;
                     }
                 }
             }
@@ -549,7 +566,7 @@ unsafe fn click_background(scene: &Scene) {
 #[test]
 fn background_click_clears_native_focus_and_tab_can_restore_it() {
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus, VK_TAB};
-    use windows::Win32::UI::WindowsAndMessaging::{GWL_STYLE, IsDialogMessageW, MSG};
+    use windows::Win32::UI::WindowsAndMessaging::{IsDialogMessageW, GWL_STYLE, MSG};
     unsafe {
         for dark in [false, true] {
             for dpi in [96, 120, 144, 192] {
@@ -609,13 +626,11 @@ fn background_click_clears_native_focus_and_tab_can_restore_it() {
                     ..Default::default()
                 };
                 assert!(IsDialogMessageW(scene.hwnd, &message).as_bool());
-                assert!(
-                    scene
-                        .app
-                        .buttons
-                        .iter()
-                        .any(|(_, child)| *child == GetFocus())
-                );
+                assert!(scene
+                    .app
+                    .buttons
+                    .iter()
+                    .any(|(_, child)| *child == GetFocus()));
                 scene.render_native(&canvas);
                 assert_eq!(
                     canvas.pixels(),
@@ -665,7 +680,7 @@ fn native_pages_keep_edit_contents_and_setting_commands_at_multiple_dpis() {
             );
             let old = scene.app.settings.auto_login;
             SendMessageW(
-                GetDlgItem(Some(scene.hwnd), 1106).unwrap(),
+                GetDlgItem(Some(scene.hwnd), 1105).unwrap(),
                 0x00f5,
                 None,
                 None,
@@ -863,7 +878,7 @@ fn icons_chevrons_and_focus_rings_have_antialiased_coverage_at_every_dpi() {
                                 accent: COLORREF(0),
                                 ..winutil::Palette::for_dark(false)
                             },
-                            true,
+                            hero::FieldState::Focus,
                         ),
                     }
                 });
@@ -940,7 +955,7 @@ fn native_adapter_has_no_blue_border_when_focused_or_open() {
 }
 
 #[test]
-fn connect_button_and_focused_input_share_the_same_corner_contour() {
+fn focused_input_draws_a_complete_outer_focus_ring() {
     use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
     unsafe {
         for dark in [false, true] {
@@ -959,19 +974,42 @@ fn connect_button_and_focused_input_share_the_same_corner_contour() {
                     ((color >> 8) & 255) as i32,
                     (color & 255) as i32,
                 ];
-                for offset in 2..scene.app.s(12) {
-                    let edge = |top| {
-                        (scene.app.s(30)..scene.app.s(50))
-                            .find(|x| {
-                                let index =
-                                    (((scene.app.s(top) + offset) * full.right + x) * 4) as usize;
-                                (0..3).all(|c| (pixels[index + c] as i32 - accent[c]).abs() < 32)
-                            })
-                            .expect("rounded accent contour must be visible")
-                    };
+                let is_accent = |x: i32, y: i32| {
+                    let at = ((y * full.right + x) * 4) as usize;
+                    (0..3).all(|c| (pixels[at + c] as i32 - accent[c]).abs() < 32)
+                };
+                // The v3 ring is a 2 DIP band OUTSIDE the field edge.
+                let y = scene.app.s(layout::USER_TOP + 22);
+                let field_left = scene.app.s(30);
+                let field_right = scene.app.s(450);
+                let ring = scene.app.s(2).max(1);
+                for dx in 1..=ring {
                     assert!(
-                        (edge(layout::USER_TOP) - edge(layout::ACTION_TOP)).abs() <= 1,
-                        "button and field radius mismatch at {dpi} DPI, row {offset}"
+                        is_accent(field_left - dx, y),
+                        "missing left outer ring at {dpi} DPI dx={dx}"
+                    );
+                    assert!(
+                        is_accent(field_right + dx - 1, y),
+                        "missing right outer ring at {dpi} DPI dx={dx}"
+                    );
+                }
+                // No accent may bleed into the field interior at mid-height.
+                assert!(
+                    !is_accent(field_left + ring + 1, y),
+                    "ring must stay outside the field at {dpi} DPI"
+                );
+                // Top and bottom edges mirror the sides.
+                let x = scene.app.s(240);
+                let field_top = scene.app.s(layout::USER_TOP);
+                let field_bottom = scene.app.s(layout::USER_TOP + 44);
+                for dy in 1..=ring {
+                    assert!(
+                        is_accent(x, field_top - dy),
+                        "missing top ring at {dpi} DPI"
+                    );
+                    assert!(
+                        is_accent(x, field_bottom + dy - 1),
+                        "missing bottom ring at {dpi} DPI"
                     );
                 }
             }
