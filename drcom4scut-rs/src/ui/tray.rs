@@ -14,8 +14,8 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos,
-    RegisterClassW, SetForegroundWindow, TrackPopupMenu, CS_HREDRAW, CS_VREDRAW, MF_SEPARATOR,
-    MF_STRING, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WNDCLASSW, WS_OVERLAPPED,
+    RegisterClassW, SetForegroundWindow, TrackPopupMenu, CS_HREDRAW, CS_VREDRAW, HICON,
+    MF_SEPARATOR, MF_STRING, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WNDCLASSW, WS_OVERLAPPED,
 };
 
 /// 托盘回调消息（NOTIFYICONDATAW.uCallbackMessage）。
@@ -46,13 +46,14 @@ fn post_main(msg: u32) {
 /// 托盘句柄集。Drop 时移除图标并销毁隐藏窗口。
 pub struct Tray {
     hwnd: HWND,
-    /// 保留 NIM_ADD 时使用的 hIcon 字节数据归属；图标本体由调用方持有。
-    _added: bool,
 }
 
 impl Tray {
-    /// 创建托盘图标。`main` 是接收菜单动作消息的主窗口。
-    pub fn create(main: HWND, icon: HIconOrFile) -> Option<Tray> {
+    /// 创建托盘图标。调用方持有 icon，直到 Tray 被销毁。
+    pub fn create(main: HWND, icon: HICON) -> Option<Tray> {
+        if icon.is_invalid() {
+            return None;
+        }
         unsafe {
             let hinstance = windows::Win32::System::LibraryLoader::GetModuleHandleW(None).ok()?;
             let class_name = w!("DrcomTrayWnd");
@@ -88,33 +89,26 @@ impl Tray {
             // 消息专用窗口没有 user data 槽位可用性差异，直接存静态里。
             MAIN_HWND.store(main.0 as isize, Ordering::Relaxed);
 
-            let mut data = NOTIFYICONDATAW {
+            let data = NOTIFYICONDATAW {
                 cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
                 hWnd: hwnd,
                 uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
                 uCallbackMessage: WM_APP_TRAY,
+                hIcon: icon,
                 szTip: utf16_tip("校园网"),
                 ..Default::default()
             };
-            match icon {
-                HIconOrFile::Handle(h) => data.hIcon = h,
-                HIconOrFile::File(path, cx, cy) => {
-                    if let Some(h) = super::winutil::load_icon(&path, cx, cy) {
-                        data.hIcon = h;
-                    }
-                }
-            }
             let added = Shell_NotifyIconW(NIM_ADD, &data).as_bool();
             if !added {
                 let _ = DestroyWindow(hwnd);
                 return None;
             }
-            Some(Tray { hwnd, _added: true })
+            Some(Tray { hwnd })
         }
     }
 
     /// 更新悬停提示：「校园网 · {状态标题}」。
-    pub fn set_tooltip(&self, text: &str) {
+    pub fn set_tooltip(&self, text: &str) -> bool {
         unsafe {
             let mut data = NOTIFYICONDATAW {
                 cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
@@ -123,7 +117,7 @@ impl Tray {
                 szTip: utf16_tip(text),
                 ..Default::default()
             };
-            let _ = Shell_NotifyIconW(NIM_MODIFY, &mut data);
+            Shell_NotifyIconW(NIM_MODIFY, &mut data).as_bool()
         }
     }
 }
@@ -143,12 +137,6 @@ impl Drop for Tray {
     }
 }
 
-/// 图标来源：现成句柄，或从文件加载指定尺寸。
-pub enum HIconOrFile {
-    Handle(windows::Win32::UI::WindowsAndMessaging::HICON),
-    File(std::path::PathBuf, i32, i32),
-}
-
 /// szTip 容量 128 个 UTF-16 单元（含 NUL），超长截断。
 fn utf16_tip(text: &str) -> [u16; 128] {
     let mut tip = [0u16; 128];
@@ -160,13 +148,8 @@ fn utf16_tip(text: &str) -> [u16; 128] {
 
 extern "system" fn tray_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
-        use windows::Win32::UI::WindowsAndMessaging::{
-            SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNA,
-            WM_CLOSE, WM_COMMAND, WM_LBUTTONDBLCLK, WM_NULL, WM_RBUTTONUP,
-        };
+        use windows::Win32::UI::WindowsAndMessaging::{WM_LBUTTONDBLCLK, WM_NULL, WM_RBUTTONUP};
         if msg == WM_APP_TRAY {
-            let main = MAIN_HWND.load(Ordering::Relaxed);
-            let main = HWND(main as *mut _);
             let mouse = lparam.0 as u32;
             match mouse {
                 WM_LBUTTONDBLCLK => {

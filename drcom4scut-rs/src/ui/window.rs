@@ -15,16 +15,17 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos, GetParent,
-    GetWindowLongPtrW, GetWindowRect, GetWindowTextW, KillTimer, LoadCursorW, LoadImageW,
-    MessageBoxW, PostQuitMessage, RegisterClassW, SendMessageW, SetCursor, SetForegroundWindow,
-    SetTimer, SetWindowLongPtrW, SetWindowTextW, ShowWindow, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA,
-    HMENU, IDC_ARROW, IDC_HAND, IDYES, IMAGE_ICON, LR_LOADFROMFILE, MA_NOACTIVATE,
-    MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MB_YESNO, SW_HIDE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
-    SW_SHOWNA, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CANCELMODE, WM_CLOSE, WM_COMMAND,
-    WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_ERASEBKGND,
-    WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCLBUTTONDOWN,
-    WM_PAINT, WM_SETFONT, WM_TIMER, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_EX_APPWINDOW,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    GetWindowLongPtrW, GetWindowRect, GetWindowTextW, IsWindowVisible, KillTimer, LoadCursorW,
+    LoadIconW, MessageBoxW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SendMessageW,
+    SetCursor, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowTextW, ShowWindow,
+    CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HMENU, IDC_ARROW, IDC_HAND, IDI_APPLICATION, IDYES,
+    MA_NOACTIVATE, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MB_YESNO, SW_HIDE, SW_MINIMIZE,
+    SW_RESTORE, SW_SHOW, SW_SHOWNA, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CANCELMODE,
+    WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC,
+    WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_NCLBUTTONDOWN, WM_PAINT, WM_SETFONT, WM_TIMER, WNDCLASSW, WS_CHILD,
+    WS_CLIPCHILDREN, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP, WS_SYSMENU,
+    WS_TABSTOP, WS_VISIBLE,
 };
 
 use crate::controller::ReconnectBackoff;
@@ -44,7 +45,7 @@ mod animation_render_tests;
 mod display;
 #[path = "v3.rs"]
 mod v3;
-use super::tray::{HIconOrFile, Tray};
+use super::tray::Tray;
 use super::winutil::{
     self, brush_as_gdi, create_font, delete_gdi, destroy_icon, font_as_gdi, solid_brush, wide,
 };
@@ -57,6 +58,11 @@ pub const WM_APP_FIELD_CLICK: u32 = windows::Win32::UI::WindowsAndMessaging::WM_
 
 const TIMER_POLL: usize = 1;
 const TIMER_MS: u32 = 2000;
+
+fn taskbar_created_message() -> u32 {
+    static MESSAGE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *MESSAGE.get_or_init(|| unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) })
+}
 const TIMER_ANIM: usize = 2;
 // WM_TIMER is quantized to the system clock. 16 ms can become two 15.6 ms
 // ticks; requesting its supported 10 ms minimum avoids an accidental 32 Hz cap.
@@ -304,6 +310,7 @@ impl Drop for App {
 
 pub fn create_main_window() -> Option<HWND> {
     unsafe {
+        let _ = taskbar_created_message();
         let hinstance = windows::Win32::System::LibraryLoader::GetModuleHandleW(None).ok()?;
         let class_name = w!("DrcomMainWnd");
         static REGISTERED: std::sync::Once = std::sync::Once::new();
@@ -356,7 +363,7 @@ pub fn create_main_window() -> Option<HWND> {
         initialize(hwnd);
         round_corners(hwnd);
         winutil::set_window_dark_mode(hwnd, is_dark);
-        if !platform::is_autostart_launch() {
+        if !platform::is_autostart_launch() || app_mut(hwnd).is_some_and(|app| app.tray.is_none()) {
             let _ = ShowWindow(hwnd, SW_SHOW);
         }
         Some(hwnd)
@@ -458,6 +465,13 @@ unsafe fn set_font(hwnd: HWND, font: windows::Win32::Graphics::Gdi::HFONT) {
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if msg != 0 && msg == taskbar_created_message() {
+        if let Some(app) = app_mut(hwnd) {
+            app.tray.take();
+            maintain_tray(hwnd);
+        }
+        return LRESULT(0);
+    }
     match msg {
         WM_CREATE => {
             let cs = &*(lparam.0 as *const windows::Win32::UI::WindowsAndMessaging::CREATESTRUCTW);
@@ -712,7 +726,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     return LRESULT(0);
                 }
                 dismiss_combo(hwnd);
-                let _ = ShowWindow(hwnd, SW_HIDE);
+                request_close(hwnd);
                 return LRESULT(0);
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -1683,25 +1697,7 @@ unsafe fn initialize(hwnd: HWND) {
         return;
     }
 
-    if let Some(path) = winutil::ensure_icon_file() {
-        let wp = wide(&path.to_string_lossy());
-        let load = |cx: i32, cy: i32| {
-            LoadImageW(
-                None,
-                PCWSTR(wp.as_ptr()),
-                IMAGE_ICON,
-                cx,
-                cy,
-                LR_LOADFROMFILE,
-            )
-            .ok()
-            .map(|h| windows::Win32::UI::WindowsAndMessaging::HICON(h.0))
-        };
-        if let Some(h) = load(16, 16) {
-            app.icon_small = h;
-        }
-        app.tray = Tray::create(hwnd, HIconOrFile::File(path, 16, 16));
-    }
+    ensure_tray(hwnd);
     let dpi = app.dpi;
     app.logo_title = winutil::rasterize_app_svg(winutil::scale(52, dpi) as u32);
     app.logo_status = winutil::rasterize_app_svg(winutil::scale(152, dpi) as u32);
@@ -2078,6 +2074,7 @@ unsafe fn on_timer(hwnd: HWND) {
     if app.preview || app.starting || app.exiting {
         return;
     }
+    maintain_tray(hwnd);
     let running = app.core.as_ref().map(|c| c.is_running()).unwrap_or(false);
     if app.core.is_some() && !running && !app.suppress_exit_failure {
         app.core = None;
@@ -2172,7 +2169,49 @@ unsafe fn apply_status(hwnd: HWND, state: LinkState, title: &str, detail: &str) 
 unsafe fn refresh_tray(app: &App) {
     if let Some(tray) = &app.tray {
         let tip = format!("校园网 · {}", app.status_title);
-        tray.set_tooltip(&tip);
+        let _ = tray.set_tooltip(&tip);
+    }
+}
+
+unsafe fn ensure_tray(hwnd: HWND) {
+    let Some(app) = app_mut(hwnd) else {
+        return;
+    };
+    if app.preview || app.exiting || app.tray.is_some() {
+        return;
+    }
+    if app.icon_small.is_invalid() {
+        if let Some(path) = winutil::ensure_icon_file() {
+            if let Some(icon) = winutil::load_icon(&path, 16, 16) {
+                app.icon_small = icon;
+            }
+        }
+    }
+    let icon = if app.icon_small.is_invalid() {
+        // The built-in shared icon keeps the tray usable if the data directory is unavailable.
+        LoadIconW(None, IDI_APPLICATION).ok()
+    } else {
+        Some(app.icon_small)
+    };
+    if let Some(icon) = icon {
+        app.tray = Tray::create(hwnd, icon);
+        refresh_tray(app);
+    }
+}
+
+unsafe fn maintain_tray(hwnd: HWND) {
+    if let Some(app) = app_mut(hwnd) {
+        if app
+            .tray
+            .as_ref()
+            .is_some_and(|tray| !tray.set_tooltip(&format!("校园网 · {}", app.status_title)))
+        {
+            app.tray.take();
+        }
+    }
+    ensure_tray(hwnd);
+    if app_mut(hwnd).is_some_and(|app| app.tray.is_none()) && !IsWindowVisible(hwnd).as_bool() {
+        let _ = ShowWindow(hwnd, SW_SHOWNA);
     }
 }
 
@@ -2181,6 +2220,23 @@ unsafe fn invalidate(hwnd: HWND) {
         v3::repaint_buttons(app);
     }
     let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), None, false);
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CloseBehavior {
+    Hide,
+    KeepVisible,
+    Exit,
+}
+
+fn close_behavior(minimize_to_tray: bool, has_tray: bool) -> CloseBehavior {
+    if !minimize_to_tray {
+        CloseBehavior::Exit
+    } else if has_tray {
+        CloseBehavior::Hide
+    } else {
+        CloseBehavior::KeepVisible
+    }
 }
 
 unsafe fn request_close(hwnd: HWND) {
@@ -2192,9 +2248,24 @@ unsafe fn request_close(hwnd: HWND) {
         return;
     }
     if app.settings.minimize_to_tray {
-        let _ = ShowWindow(hwnd, SW_HIDE);
-    } else {
-        begin_exit(hwnd);
+        maintain_tray(hwnd);
+    }
+    match close_behavior(app.settings.minimize_to_tray, app.tray.is_some()) {
+        CloseBehavior::Hide => {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
+        CloseBehavior::KeepVisible => {
+            let _ = ShowWindow(hwnd, SW_SHOW);
+            if !app.preview {
+                let _ = MessageBoxW(
+                    Some(hwnd),
+                    w!("系统托盘暂不可用，窗口会保持打开并自动重试。"),
+                    w!("无法隐藏到托盘"),
+                    MB_OK | MB_ICONWARNING,
+                );
+            }
+        }
+        CloseBehavior::Exit => begin_exit(hwnd),
     }
 }
 

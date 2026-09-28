@@ -566,6 +566,13 @@ unsafe fn click_background(scene: &Scene) {
 }
 
 #[test]
+fn close_behavior_requires_a_registered_tray() {
+    assert_eq!(close_behavior(true, false), CloseBehavior::KeepVisible);
+    assert_eq!(close_behavior(true, true), CloseBehavior::Hide);
+    assert_eq!(close_behavior(false, false), CloseBehavior::Exit);
+}
+
+#[test]
 fn overlapped_child_click_selects_combo_item_instead_of_the_button() {
     use windows::Win32::Foundation::POINT;
     use windows::Win32::Graphics::Gdi::{ClientToScreen, ScreenToClient};
