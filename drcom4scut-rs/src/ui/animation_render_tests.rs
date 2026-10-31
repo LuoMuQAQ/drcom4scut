@@ -566,6 +566,50 @@ unsafe fn click_background(scene: &Scene) {
 }
 
 #[test]
+fn autostart_keeps_initial_window_hidden_without_a_tray() {
+    unsafe {
+        let mut scene = Scene::new(96);
+        scene.app.silent_start = true;
+        assert!(scene.app.tray.is_none());
+        show_initial_window(scene.hwnd);
+        assert!(
+            !IsWindowVisible(scene.hwnd).as_bool(),
+            "login startup must remain hidden while Explorer is not ready"
+        );
+
+        scene.app.silent_start = false;
+        show_initial_window(scene.hwnd);
+        assert!(IsWindowVisible(scene.hwnd).as_bool());
+    }
+}
+
+#[test]
+fn autostart_tray_retries_stay_hidden_until_the_user_opens_the_window() {
+    unsafe {
+        let mut scene = Scene::new(96);
+        scene.app.silent_start = true;
+        for _ in 0..3 {
+            maintain_tray(scene.hwnd);
+            assert!(
+                !IsWindowVisible(scene.hwnd).as_bool(),
+                "failed tray retries must not reveal a login startup window"
+            );
+        }
+        wndproc(scene.hwnd, taskbar_created_message(), WPARAM(0), LPARAM(0));
+        assert!(!IsWindowVisible(scene.hwnd).as_bool());
+
+        wndproc(scene.hwnd, WM_APP_OPEN, WPARAM(0), LPARAM(0));
+        assert!(IsWindowVisible(scene.hwnd).as_bool());
+        assert!(!scene.app.silent_start);
+
+        // After an explicit open, preserve the existing tray-loss fallback.
+        let _ = ShowWindow(scene.hwnd, SW_HIDE);
+        maintain_tray(scene.hwnd);
+        assert!(IsWindowVisible(scene.hwnd).as_bool());
+    }
+}
+
+#[test]
 fn close_behavior_requires_a_registered_tray() {
     assert_eq!(close_behavior(true, false), CloseBehavior::KeepVisible);
     assert_eq!(close_behavior(true, true), CloseBehavior::Hide);

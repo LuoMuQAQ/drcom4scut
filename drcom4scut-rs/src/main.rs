@@ -12,35 +12,42 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 fn main() {
+    let autostart = platform::is_autostart_launch();
     let guard = match platform::acquire(platform::MUTEX_NAME) {
         Ok(g) => g,
         Err(platform::AlreadyRunning::InstanceRunning) => {
-            let _ = platform::Guard::wake_other(platform::WAKE_EVENT_NAME);
+            if !autostart {
+                let _ = platform::Guard::wake_other(platform::WAKE_EVENT_NAME);
+            }
             return;
         }
         Err(platform::AlreadyRunning::Win32(e)) => {
-            let text = format!("无法获取单实例锁：{e}");
-            let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-            unsafe {
-                let _ = MessageBoxW(
-                    None,
-                    windows::core::PCWSTR(wide.as_ptr()),
-                    w!("校园网"),
-                    MB_OK | MB_ICONERROR,
-                );
+            if !autostart {
+                let text = format!("无法获取单实例锁：{e}");
+                let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+                unsafe {
+                    let _ = MessageBoxW(
+                        None,
+                        windows::core::PCWSTR(wide.as_ptr()),
+                        w!("校园网"),
+                        MB_OK | MB_ICONERROR,
+                    );
+                }
             }
             return;
         }
     };
 
     let Some(hwnd) = ui::window::create_main_window() else {
-        unsafe {
-            let _ = MessageBoxW(
-                None,
-                w!("无法创建主窗口。"),
-                w!("校园网"),
-                MB_OK | MB_ICONERROR,
-            );
+        if !autostart {
+            unsafe {
+                let _ = MessageBoxW(
+                    None,
+                    w!("无法创建主窗口。"),
+                    w!("校园网"),
+                    MB_OK | MB_ICONERROR,
+                );
+            }
         }
         return;
     };

@@ -19,13 +19,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     LoadIconW, MessageBoxW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SendMessageW,
     SetCursor, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowTextW, ShowWindow,
     CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HMENU, IDC_ARROW, IDC_HAND, IDI_APPLICATION, IDYES,
-    MA_NOACTIVATE, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MB_YESNO, SW_HIDE, SW_MINIMIZE,
-    SW_RESTORE, SW_SHOW, SW_SHOWNA, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CANCELMODE,
-    WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC,
-    WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NCLBUTTONDOWN, WM_PAINT, WM_SETFONT, WM_TIMER, WNDCLASSW, WS_CHILD,
-    WS_CLIPCHILDREN, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP, WS_SYSMENU,
-    WS_TABSTOP, WS_VISIBLE,
+    MA_NOACTIVATE, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MB_YESNO, MESSAGEBOX_RESULT,
+    MESSAGEBOX_STYLE, SW_HIDE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNA, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_ACTIVATE, WM_CANCELMODE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT,
+    WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCLBUTTONDOWN, WM_PAINT, WM_SETFONT,
+    WM_TIMER, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
 use crate::controller::ReconnectBackoff;
@@ -102,6 +102,8 @@ enum Hit {
 
 struct App {
     preview: bool,
+    // Keep login startup silent until the user explicitly opens the client.
+    silent_start: bool,
     preferences: bool,
     buttons: Vec<(Hit, HWND)>,
     settings: Settings,
@@ -188,6 +190,7 @@ impl App {
         let palette = winutil::Palette::for_dark(is_dark);
         Self {
             preview,
+            silent_start: platform::is_autostart_launch(),
             preferences: false,
             buttons: Vec::new(),
             settings: Settings::default(),
@@ -363,11 +366,24 @@ pub fn create_main_window() -> Option<HWND> {
         initialize(hwnd);
         round_corners(hwnd);
         winutil::set_window_dark_mode(hwnd, is_dark);
-        if !platform::is_autostart_launch() || app_mut(hwnd).is_some_and(|app| app.tray.is_none()) {
-            let _ = ShowWindow(hwnd, SW_SHOW);
-        }
+        show_initial_window(hwnd);
         Some(hwnd)
     }
+}
+
+unsafe fn show_initial_window(hwnd: HWND) {
+    if app_mut(hwnd).is_some_and(|app| !app.silent_start) {
+        let _ = ShowWindow(hwnd, SW_SHOW);
+    }
+}
+
+unsafe fn open_main_window(hwnd: HWND) {
+    if let Some(app) = app_mut(hwnd) {
+        app.silent_start = false;
+    }
+    let _ = ShowWindow(hwnd, SW_RESTORE);
+    let _ = ShowWindow(hwnd, SW_SHOW);
+    let _ = SetForegroundWindow(hwnd);
 }
 
 unsafe fn round_corners(hwnd: HWND) {
@@ -744,14 +760,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_APP_OPEN => {
-            let _ = ShowWindow(hwnd, SW_RESTORE);
-            let _ = ShowWindow(hwnd, SW_SHOW);
-            let _ = SetForegroundWindow(hwnd);
+            open_main_window(hwnd);
             LRESULT(0)
         }
         WM_APP_CONNECT => {
-            let _ = ShowWindow(hwnd, SW_SHOW);
-            let _ = SetForegroundWindow(hwnd);
+            open_main_window(hwnd);
             start_connect(hwnd);
             LRESULT(0)
         }
@@ -1674,6 +1687,18 @@ unsafe fn create_controls(hwnd: HWND) {
     v3::create_buttons(hwnd);
 }
 
+unsafe fn startup_message(
+    hwnd: HWND,
+    text: PCWSTR,
+    caption: PCWSTR,
+    style: MESSAGEBOX_STYLE,
+) -> MESSAGEBOX_RESULT {
+    if app_mut(hwnd).is_some_and(|app| app.silent_start) {
+        return MESSAGEBOX_RESULT(0);
+    }
+    MessageBoxW(Some(hwnd), text, caption, style)
+}
+
 unsafe fn initialize(hwnd: HWND) {
     let Some(app) = app_mut(hwnd) else {
         return;
@@ -1718,9 +1743,11 @@ unsafe fn initialize(hwnd: HWND) {
                     (paths::legacy_local_app_data_root(), paths::root())
                 {
                     if let Err(e) = crate::install::migrate::migrate_user_data(&legacy, &dest) {
-                        let msg = wide(&format!("{}\n将使用默认设置。", e.message()));
-                        let _ = MessageBoxW(
-                            Some(hwnd),
+                        app.status_title = "设置迁移失败".into();
+                        app.status_detail = format!("{}\n将使用默认设置。", e.message());
+                        let msg = wide(&app.status_detail);
+                        let _ = startup_message(
+                            hwnd,
                             PCWSTR(msg.as_ptr()),
                             w!("设置迁移失败"),
                             MB_OK | MB_ICONWARNING,
@@ -1737,8 +1764,8 @@ unsafe fn initialize(hwnd: HWND) {
                 let msg = wide(&format!(
                     "安装版不能把数据写到 LocalAppData。请重新运行安装包完成本用户初始化。\n{e}"
                 ));
-                let _ = MessageBoxW(
-                    Some(hwnd),
+                let _ = startup_message(
+                    hwnd,
                     PCWSTR(msg.as_ptr()),
                     w!("用户数据未初始化"),
                     MB_OK | MB_ICONWARNING,
@@ -1752,9 +1779,11 @@ unsafe fn initialize(hwnd: HWND) {
     match settings::migrate_legacy() {
         Ok(s) => app.settings = s,
         Err(e) => {
-            let msg = wide(&format!("{}\n将使用默认设置。", e.message()));
-            let _ = MessageBoxW(
-                Some(hwnd),
+            app.status_title = "设置迁移失败".into();
+            app.status_detail = format!("{}\n将使用默认设置。", e.message());
+            let msg = wide(&app.status_detail);
+            let _ = startup_message(
+                hwnd,
                 PCWSTR(msg.as_ptr()),
                 w!("设置迁移失败"),
                 MB_OK | MB_ICONWARNING,
@@ -1780,8 +1809,8 @@ unsafe fn initialize(hwnd: HWND) {
                 "校园网核心需要 Npcap 驱动。安装时请启用 WinPcap API 兼容模式。\n\n是否打开 Npcap 官方下载页？"
             };
             let ask_w = wide(ask);
-            let r = MessageBoxW(
-                Some(hwnd),
+            let r = startup_message(
+                hwnd,
                 PCWSTR(ask_w.as_ptr()),
                 w!("需要安装 Npcap"),
                 MB_YESNO | MB_ICONINFORMATION,
@@ -1811,8 +1840,8 @@ unsafe fn initialize(hwnd: HWND) {
             let msg = wide(&format!(
                 "{e}\n\n安装版核心位于受保护目录，当前用户不能重写。请重新运行安装包修复。"
             ));
-            let _ = MessageBoxW(
-                Some(hwnd),
+            let _ = startup_message(
+                hwnd,
                 PCWSTR(msg.as_ptr()),
                 w!("核心缺失或损坏"),
                 MB_OK | MB_ICONWARNING,
@@ -2210,7 +2239,9 @@ unsafe fn maintain_tray(hwnd: HWND) {
         }
     }
     ensure_tray(hwnd);
-    if app_mut(hwnd).is_some_and(|app| app.tray.is_none()) && !IsWindowVisible(hwnd).as_bool() {
+    if app_mut(hwnd).is_some_and(|app| app.tray.is_none() && !app.silent_start)
+        && !IsWindowVisible(hwnd).as_bool()
+    {
         let _ = ShowWindow(hwnd, SW_SHOWNA);
     }
 }

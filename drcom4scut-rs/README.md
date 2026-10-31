@@ -17,7 +17,7 @@
 - UDP 每代独立接收认证通知，失效状态清除成功缓存，修复重连消息竞争。
 - 开关滑动与网卡菜单淡入/滑入动画，采用局部重绘和菜单缓存，支持连续切换及高 DPI。
 - 运行时切换分辨率、系统缩放或显示器时，窗口、字体、输入框、图标和点击区域同步适配；小工作区整体缩放，恢复后回到正常尺寸。
-- 客户端默认申请管理员权限，可配置以最高权限运行的登录自启计划任务；自启时不显示窗口，在托盘后台运行。
+- 客户端默认申请管理员权限，可配置以最高权限运行的登录自启计划任务；自启时静默后台运行，任务栏尚未就绪时持续重试托盘，不弹出主窗口或启动提示。双击托盘或手动打开程序后显示窗口。
 - 核心内部自动恢复，外层提供停滞检测和退避；只有 UDP 心跳成功才判定完整连接健康，EAP 心跳无法掩盖 UDP 停滞。EAP 认证成功后界面显示已连接。正常心跳和夜间定时等待不会被周期重启。
 - 关闭、断开或结束 GUI 进程时，核心先发送 EAPOL-Logoff 再退出；核心崩溃不会连带退出 GUI。
 - 密码设置使用 Windows DPAPI 保护，凭据通过子进程环境传入核心，不放在命令行中；核心不会在启动日志中输出密码。
@@ -31,7 +31,7 @@ Windows GUI / 安装包的公开版本号从 **0.3.1** 开始，与上游最新 
 
 内嵌认证核心基于上游提交 `ef20ae5c71744eb9e096f5e586713490ba01f4ee`（核心自身版本 0.3.2），在上游之外加入环境变量凭据、移除密码日志，以及 GUI 退出时发送 EAPOL-Logoff 并随 GUI 结束。核心保持真实版本号，与 GUI 的发行版本独立；见 `drcom4scut_0.3.1/vendor/drcom4scut-0.3.2/PATCHES.md`。
 
-本次适配器下拉修订的对应源码为 [windows-v0.3.6-combo-select](https://github.com/LuoMuQAQ/drcom4scut/tree/windows-v0.3.6-combo-select)。发布页沿用 windows-v0.3.6，原始标签与此前 heroui / fidelity 标签保留；请使用发布说明中的本次源码链接或专用源码附件。
+本次静默开机自启修订的对应源码为 [windows-v0.3.6-silent-autostart](https://github.com/LuoMuQAQ/drcom4scut/tree/windows-v0.3.6-silent-autostart)。发布页沿用 windows-v0.3.6，原始标签与此前修订标签保留；请使用发布说明中的本次源码链接或专用源码附件。
 
 ## 构建
 
@@ -48,7 +48,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\publish-portable.ps1
 
 临时目录含非 ASCII 字符时，向发布脚本传入 `-BuildDirectory C:\drcom-build -PayloadDirectory C:\drcom-payload`。安装包在 `drcom4scut-rs/release/setup`，GUI 和便携 ZIP 在 `drcom4scut-rs/release`。内嵌核心的对应源码和可复现构建说明见 `drcom4scut-rs/BUILD.txt`。
 
-验证：187 项 GUI/安装测试、13 项核心离线测试与 3 项快照测试通过；快照覆盖深浅色及 100%～200% 缩放。真实校园网断线恢复、睡眠唤醒和长期稳定性仍待实机验证，Windows 10022 底层原因尚未确定。发行 EXE 未代码签名。
+本轮验证：194 项 GUI/安装测试通过，5 项需显式运行的测试跳过；新增回归覆盖自启时托盘不可用、托盘重试与主动打开窗口。实际重启登录、真实校园网断线恢复、睡眠唤醒和长期稳定性仍待实机验证，Windows 10022 底层原因尚未确定。发行 EXE 未代码签名。
 
 ## 许可证
 
