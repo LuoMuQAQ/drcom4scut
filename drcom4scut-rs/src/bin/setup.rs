@@ -1,11 +1,10 @@
 #![windows_subsystem = "windows"]
 //! Native installer: responsive unelevated UI, elevated file/driver worker.
 use drcom4scut_gui::install::{
-    acl, driver, driver_flow, flow, identity, knownfolder, origin, process, sid,
+    acl, cli, driver, driver_flow, flow, identity, knownfolder, origin, sid,
 };
 use flow::{InstallOptions, InstallResult};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 use windows::core::{w, PCWSTR};
 
 #[path = "../install/setup_window.rs"]
@@ -151,17 +150,13 @@ fn worker_main(dir: PathBuf, nonce: String) -> i32 {
         } else {
             progress(&dir, 8, "正在准备安装文件…");
             let payload = flow::default_payload()?;
-            process::stop_owned(&opts.install_dir, Duration::from_secs(8))?;
-            if origin::cancel_requested(&dir) {
-                return Err("安装已取消。".into());
-            }
-            progress(&dir, 16, "正在清理旧安装残留…");
-            flow::prepare_install_dir(&opts.install_dir)?;
-            progress(&dir, 25, "正在安装校园网客户端…");
-            flow::install_files(&opts, &source, &payload, false)?;
-            progress(&dir, 58, "正在创建快捷方式和卸载入口…");
-            flow::create_shortcuts(&opts)?;
-            flow::register_uninstall(&opts, &payload)?;
+            flow::install_package(
+                &opts,
+                &source,
+                &payload,
+                &mut |percent, message| progress(&dir, percent, message),
+                &|| origin::cancel_requested(&dir),
+            )?;
         }
         // Executed as administrator: cache must not be replaceable by normal users.
         let cache = opts.install_dir.join(format!(".npcap-setup-{nonce}"));
@@ -212,7 +207,7 @@ fn worker_main(dir: PathBuf, nonce: String) -> i32 {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|a| a == "--worker") {
+    if args.first().is_some_and(|a| a == "--worker") {
         let dir = args
             .iter()
             .find_map(|a| a.strip_prefix("--origin="))
@@ -221,12 +216,16 @@ fn main() {
             .iter()
             .find_map(|a| a.strip_prefix("--nonce="))
             .map(str::to_owned);
-        if let (Some(dir), Some(nonce)) = (dir, nonce) {
+        if let (3, Some(dir), Some(nonce)) = (args.len(), dir, nonce) {
             std::process::exit(worker_main(dir, nonce));
         }
-        return;
+        std::process::exit(cli::INVALID_ARGUMENTS);
     }
-    setup_window::run();
+    if let Some(code) = cli::run_args(&args) {
+        std::process::exit(code);
+    } else {
+        setup_window::run();
+    }
 }
 
 #[cfg(test)]
@@ -592,7 +591,7 @@ mod tests {
                     state.result = Some(flow::InstallResult {
                         ok: true,
                         install_dir: r"C:\Program Files\drcom4scut".into(),
-                        version: "0.3.6".into(),
+                        version: env!("CARGO_PKG_VERSION").into(),
                         need_reboot: false,
                         launch: true,
                         message: "客户端已安装完成，可以立即开始连接校园网。".into(),
@@ -613,7 +612,7 @@ mod tests {
                     state.result = Some(flow::InstallResult {
                         ok: true,
                         install_dir: r"C:\Program Files\drcom4scut".into(),
-                        version: "0.3.6".into(),
+                        version: env!("CARGO_PKG_VERSION").into(),
                         need_reboot: false,
                         launch: false,
                         message: "应用文件已写入，但 Npcap 驱动安装未完成。请点击重试。".into(),
@@ -632,7 +631,7 @@ mod tests {
                     state.result = Some(flow::InstallResult {
                         ok: true,
                         install_dir: r"C:\Program Files\drcom4scut".into(),
-                        version: "0.3.6".into(),
+                        version: env!("CARGO_PKG_VERSION").into(),
                         need_reboot: true,
                         launch: false,
                         message: "驱动配置已更新，需要重启系统后生效。".into(),
@@ -651,7 +650,7 @@ mod tests {
                     state.result = Some(flow::InstallResult {
                         ok: false,
                         install_dir: r"C:\Program Files\drcom4scut".into(),
-                        version: "0.3.6".into(),
+                        version: env!("CARGO_PKG_VERSION").into(),
                         need_reboot: false,
                         launch: false,
                         message: "用户取消了管理员授权或安装过程中止。".into(),

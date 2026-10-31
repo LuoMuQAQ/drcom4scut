@@ -9,6 +9,7 @@ use super::driver::DriverHost;
 use super::identity::{self, new_install_id, InstallState};
 use super::knownfolder;
 use super::origin::Origin;
+use super::process;
 use super::registry;
 use super::shortcuts;
 use super::transaction::Transaction;
@@ -211,6 +212,31 @@ pub fn create_shortcuts(opts: &InstallOptions) -> Result<(), String> {
 pub fn register_uninstall(opts: &InstallOptions, payload: &Payload) -> Result<(), String> {
     let size_kb = ((payload.gui.len() + payload.uninstall.len() + CORE_BYTES.len()) / 1024) as u32;
     registry::write_uninstall_key(&opts.install_dir, size_kb.max(1), None)
+}
+
+/// Shared file/registration transaction for the GUI worker and terminal installer.
+/// Callers hold the maintenance lock and validate the selected directory first.
+pub fn install_package(
+    opts: &InstallOptions,
+    source: &Origin,
+    payload: &Payload,
+    report: &mut dyn FnMut(u32, &str),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(), String> {
+    if cancelled() {
+        return Err("安装已取消。".into());
+    }
+    process::stop_owned(&opts.install_dir, std::time::Duration::from_secs(8))?;
+    if cancelled() {
+        return Err("安装已取消。".into());
+    }
+    report(16, "正在清理旧安装残留…");
+    prepare_install_dir(&opts.install_dir)?;
+    report(25, "正在安装校园网客户端…");
+    install_files(opts, source, payload, false)?;
+    report(58, "正在创建快捷方式和卸载入口…");
+    create_shortcuts(opts)?;
+    register_uninstall(opts, payload)
 }
 
 pub fn run_driver_step<H: DriverHost>(
@@ -571,6 +597,28 @@ mod tests {
             state,
         }
     }
+    #[test]
+    fn cancelled_shared_install_does_not_write_files_or_report_progress() {
+        let dest = tmp("cancelled-shared-install");
+        let marker = dest.join("keep.txt");
+        std::fs::write(&marker, b"personal").unwrap();
+        let opts = InstallOptions {
+            install_dir: dest.clone(),
+            ..Default::default()
+        };
+        let result = install_package(
+            &opts,
+            &origin("S-1-5-21-1-2-3-1001"),
+            &payload(),
+            &mut |_, _| panic!("cancelled install reported progress"),
+            &|| true,
+        );
+        assert!(result.unwrap_err().contains("取消"));
+        assert_eq!(std::fs::read(&marker).unwrap(), b"personal");
+        assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 1);
+        std::fs::remove_dir_all(dest).unwrap();
+    }
+
     #[test]
     fn unmarked_data_and_invalid_marker_never_deleted() {
         let dest = tmp("foreign-data");

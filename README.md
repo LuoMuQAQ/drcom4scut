@@ -1,14 +1,41 @@
-# drcom4scut Windows GUI 0.3.6
+# drcom4scut Windows GUI 0.3.7
 
 基于 [SeaLoong/drcom4scut](https://github.com/SeaLoong/drcom4scut) 的 Windows 原生图形客户端，使用 Rust / Win32 编写。本项目是独立维护的 GUI fork，感谢原作者提供认证核心。
 
 ## 下载和安装
 
-前往 [Releases](https://github.com/LuoMuQAQ/drcom4scut/releases/latest)，下载 **drcom4scut-Setup-0.3.6.exe** 安装版。默认安装到 64 位 Program Files，可自行选择本地目录；已安装时在原目录覆盖升级。
+前往 [Releases](https://github.com/LuoMuQAQ/drcom4scut/releases/latest)，下载 **drcom4scut-Setup-0.3.7.exe** 安装版。默认安装到 64 位 Program Files，可自行选择本地目录；已安装时在原目录覆盖升级。
 
-也提供 **drcom4scut-Portable-0.3.6-win-x64.zip** 便携版，完整解压后运行 `drcom4scutGUI.exe`，需要系统已有兼容 x64 Npcap / WinPcap 驱动。便携模式数据位于 `%LOCALAPPDATA%/drcom4scutGUI`，不会随解压目录移动。
+也提供 **drcom4scut-Portable-0.3.7-win-x64.zip** 便携版，完整解压后运行 `drcom4scutGUI.exe`，需要系统已有兼容 x64 Npcap / WinPcap 驱动。便携模式数据位于 `%LOCALAPPDATA%/drcom4scutGUI`，不会随解压目录移动。
 
 安装器自动检测兼容 x64 Npcap / WinPcap。缺少时从官网下载 Npcap 1.88，核验 SHA-256 与 Authenticode 后启动官方安装窗口。免费 Npcap 需要在官方窗口确认许可和安装，不能全静默安装；本项目不内嵌或再分发 Npcap 安装包。
+
+## 终端安装与升级
+
+在**管理员 PowerShell** 中执行。终端模式需要系统已有兼容的 x64 Npcap / WinPcap，缺少时返回错误，使用不带参数的图形安装器安装驱动即可。
+
+```powershell
+$p = Start-Process -FilePath .\drcom4scut-Setup-0.3.7.exe `
+    -ArgumentList '--install --json' -PassThru `
+    -RedirectStandardOutput .\install-result.json
+$p.WaitForExit()
+$p.ExitCode
+Get-Content .\install-result.json
+```
+
+`--install`（或 `--silent`）不显示安装窗口，也不会弹出 UAC，需事先打开管理员终端。默认沿用已安装目录进行覆盖升级，保留用户设置和原有快捷方式选项；新安装默认位于 64 位 Program Files。升级时会停止旧客户端，网络可能短暂断开。
+
+可追加 `--install-dir="D:\Campus Client"` 指定目录（已有安装时仍需使用原目录）；追加 `--launch` 在安装后静默启动客户端，自动连接按原“自动登录”设置执行。默认只安装。`--help` 查看帮助，`--version` 查询版本，`--json` 输出包含 `ok`、`version`、`installDir` 和 `exitCode` 的单条 JSON。
+
+| 退出码 | 含义 |
+| --- | --- |
+| 0 | 安装成功 |
+| 2 | 参数错误 |
+| 740 | 需要管理员终端 |
+| 1603 | 安装失败或缺少兼容驱动 |
+| 1618 | 另一安装或卸载正在进行 |
+
+不带参数运行安装包时仍打开图形安装界面。
 
 ## 功能
 
@@ -27,11 +54,11 @@
 
 ## 版本与来源
 
-Windows GUI / 安装包的公开版本号从 **0.3.1** 开始，与上游最新 Release 编号对齐。本次 Release 标记使用 **windows-v0.3.6**，避免与保留的上游 `v0.3.1` 标记混淆。
+Windows GUI / 安装包的公开版本号从 **0.3.1** 开始，与上游最新 Release 编号对齐。本次 Release 标记使用 **windows-v0.3.7**，避免与保留的上游 `v0.3.1` 标记混淆。
 
 内嵌认证核心基于上游提交 `ef20ae5c71744eb9e096f5e586713490ba01f4ee`（核心自身版本 0.3.2），在上游之外加入环境变量凭据、移除密码日志，以及 GUI 退出时发送 EAPOL-Logoff 并随 GUI 结束。核心保持真实版本号，与 GUI 的发行版本独立；见 `drcom4scut_0.3.1/vendor/drcom4scut-0.3.2/PATCHES.md`。
 
-本次静默开机自启修订的对应源码为 [windows-v0.3.6-silent-autostart](https://github.com/LuoMuQAQ/drcom4scut/tree/windows-v0.3.6-silent-autostart)。发布页沿用 windows-v0.3.6，原始标签与此前修订标签保留；请使用发布说明中的本次源码链接或专用源码附件。
+本次 0.3.7 的对应源码为 [windows-v0.3.7](https://github.com/LuoMuQAQ/drcom4scut/tree/windows-v0.3.7)，可直接使用该 Release 的源码附件或 GitHub 自动生成的 Source code。
 
 ## 构建
 
@@ -48,7 +75,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\publish-portable.ps1
 
 临时目录含非 ASCII 字符时，向发布脚本传入 `-BuildDirectory C:\drcom-build -PayloadDirectory C:\drcom-payload`。安装包在 `drcom4scut-rs/release/setup`，GUI 和便携 ZIP 在 `drcom4scut-rs/release`。内嵌核心的对应源码和可复现构建说明见 `drcom4scut-rs/BUILD.txt`。
 
-本轮验证：194 项 GUI/安装测试通过，5 项需显式运行的测试跳过；新增回归覆盖自启时托盘不可用、托盘重试与主动打开窗口。实际重启登录、真实校园网断线恢复、睡眠唤醒和长期稳定性仍待实机验证，Windows 10022 底层原因尚未确定。发行 EXE 未代码签名。
+本轮验证：202 项 GUI/安装测试通过，5 项需显式运行的测试跳过；新增测试覆盖终端参数、路径选择、驱动前置检查和共享安装取消；保留静默自启回归。实际重启登录、真实校园网断线恢复、睡眠唤醒和长期稳定性仍待实机验证，Windows 10022 底层原因尚未确定。发行 EXE 未代码签名。
 
 ## 许可证
 

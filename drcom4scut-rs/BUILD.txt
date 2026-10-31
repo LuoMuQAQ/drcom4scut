@@ -1,4 +1,4 @@
-Windows GUI release 0.3.6
+Windows GUI release 0.3.7
 
 Build the GUI/installer with drcom4scut-rs/publish-setup.ps1.
 Rust: nightly-2026-09-06-x86_64-pc-windows-gnu; explicit target x86_64-pc-windows-gnu.
@@ -12,9 +12,13 @@ The core script defaults to drcom4scut-rs/resources/drcom4scut.exe; use -Destina
 The script downloads and verifies Npcap SDK 1.15, compiles core 0.3.2, and validates --version and SHA256.
 The verified binary is copied only after version/hash checks; historical .NET resources are preserved.
 Core SHA256: e571bf8b366db40c43a0b4e17e8faaafe2088c242ede4856995965b2868d5083
-Core version remains 0.3.2 to preserve accurate upstream provenance. GUI/release version is 0.3.6.
+Core version remains 0.3.2 to preserve accurate upstream provenance. GUI/release version is 0.3.7.
 See core PATCHES.md for the credential-handling patches and the GUI lifetime binding. The core exits after an EAPOL-Logoff when the GUI process handle or shutdown event is signaled.
 
 After publish-setup.ps1, run drcom4scut-rs/publish-portable.ps1 to create the portable ZIP.
 Release uploads: Setup, Portable ZIP, revision source ZIP, and SHA256SUMS.
-Corresponding source tag: windows-v0.3.6-silent-autostart in https://github.com/LuoMuQAQ/drcom4scut
+Corresponding source tag: windows-v0.3.7 in https://github.com/LuoMuQAQ/drcom4scut
+
+Terminal installation: run Setup --install [--install-dir PATH] [--launch] [--json] from an administrator terminal.
+The terminal mode requires a compatible x64 Npcap/WinPcap already installed and never opens installer/UAC windows.
+Without arguments, Setup uses the existing GUI flow. Use --help for exit codes and all options.

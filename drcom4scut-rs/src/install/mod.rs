@@ -1,6 +1,7 @@
 //! 安装/卸载共用逻辑。
 
 pub mod acl;
+pub mod cli;
 pub mod driver;
 pub mod driver_flow;
 pub mod flow;
