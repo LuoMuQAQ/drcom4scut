@@ -583,6 +583,153 @@ fn autostart_keeps_initial_window_hidden_without_a_tray() {
     }
 }
 
+#[derive(Default)]
+struct PresentationTrace {
+    paints: Vec<(isize, u32)>,
+    cold_child: bool,
+}
+
+thread_local! {
+    static PRESENTATION_TRACE: std::cell::RefCell<PresentationTrace> =
+        std::cell::RefCell::new(PresentationTrace::default());
+}
+
+unsafe fn presentation_cloak(hwnd: HWND) -> u32 {
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmGetWindowAttribute(hwnd: HWND, attribute: u32, value: *mut u32, size: u32) -> i32;
+    }
+    let mut cloaked = 0;
+    assert_eq!(DwmGetWindowAttribute(hwnd, 14, &mut cloaked, 4), 0);
+    cloaked
+}
+
+unsafe extern "system" fn presentation_parent_proc(
+    hwnd: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+) -> LRESULT {
+    if msg == WM_PAINT {
+        let result = wndproc(hwnd, msg, wp, lp);
+        PRESENTATION_TRACE.with(|trace| {
+            trace
+                .borrow_mut()
+                .paints
+                .push((hwnd.0 as isize, presentation_cloak(hwnd)))
+        });
+        result
+    } else {
+        fixture_proc(hwnd, msg, wp, lp)
+    }
+}
+
+unsafe extern "system" fn presentation_child_proc(
+    hwnd: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    _id: usize,
+    parent: usize,
+) -> LRESULT {
+    use windows::Win32::UI::Shell::DefSubclassProc;
+    if msg == WM_PAINT {
+        let cold = PRESENTATION_TRACE.with(|trace| {
+            let mut trace = trace.borrow_mut();
+            std::mem::take(&mut trace.cold_child)
+        });
+        if cold {
+            // Deterministically model first-use font/theme work in one child.
+            std::thread::sleep(std::time::Duration::from_millis(40));
+        }
+        let result = DefSubclassProc(hwnd, msg, wp, lp);
+        let cloaked = presentation_cloak(HWND(parent as *mut _));
+        PRESENTATION_TRACE.with(|trace| trace.borrow_mut().paints.push((hwnd.0 as isize, cloaked)));
+        result
+    } else {
+        DefSubclassProc(hwnd, msg, wp, lp)
+    }
+}
+
+#[test]
+fn opening_a_window_finishes_the_entire_frame_before_presenting_it() {
+    use windows::Win32::Graphics::Gdi::GetUpdateRect;
+    use windows::Win32::UI::Shell::SetWindowSubclass;
+    use windows::Win32::UI::WindowsAndMessaging::{GWLP_WNDPROC, GWL_STYLE};
+    unsafe {
+        for dark in [false, true] {
+            for dpi in [96, 144, 192] {
+                let mut scene = Scene::new_themed(dpi, dark);
+                scene.app.preview_dpi = Some(dpi);
+                scene.attach_native_controls();
+                SetWindowLongPtrW(
+                    scene.hwnd,
+                    GWL_STYLE,
+                    (WS_POPUP.0 | WS_SYSMENU.0 | WS_CLIPCHILDREN.0) as isize,
+                );
+                SetWindowLongPtrW(
+                    scene.hwnd,
+                    GWLP_WNDPROC,
+                    presentation_parent_proc as *const () as usize as isize,
+                );
+                let mut children = vec![
+                    scene.app.hwnd_user_label,
+                    scene.app.hwnd_user,
+                    scene.app.hwnd_pass_label,
+                    scene.app.hwnd_pass,
+                    scene.app.hwnd_eye,
+                ];
+                children.extend(scene.app.buttons.iter().map(|(_, child)| *child));
+                for child in &children {
+                    SetWindowSubclass(
+                        *child,
+                        Some(presentation_child_proc),
+                        0x4652414D,
+                        scene.hwnd.0 as usize,
+                    )
+                    .unwrap();
+                }
+                for show in 0..2 {
+                    PRESENTATION_TRACE.with(|trace| {
+                        *trace.borrow_mut() = PresentationTrace {
+                            paints: Vec::new(),
+                            cold_child: show == 0,
+                        }
+                    });
+                    let start = Instant::now();
+                    if show == 0 {
+                        show_initial_window(scene.hwnd);
+                    } else {
+                        open_main_window(scene.hwnd);
+                    }
+                    let elapsed = start.elapsed();
+                    assert!(IsWindowVisible(scene.hwnd).as_bool());
+                    PRESENTATION_TRACE.with(|trace| {
+                        let trace = trace.borrow();
+                        assert!(trace.paints.iter().any(|(hwnd, _)| *hwnd == scene.hwnd.0 as isize),
+                            "parent frame is still queued after show: dpi={dpi}, dark={dark}, open={show}, elapsed={elapsed:?}");
+                        for child in &children {
+                            if IsWindowVisible(*child).as_bool() {
+                                assert!(trace.paints.iter().any(|(hwnd, _)| *hwnd == child.0 as isize),
+                                    "child was not painted before presentation: {child:?}");
+                                assert!(!GetUpdateRect(*child, None, false).as_bool());
+                            }
+                        }
+                        assert!(trace.paints.iter().all(|(_, cloaked)| cloaked & 1 != 0),
+                            "a partial frame was exposed during native painting: {:?}", trace.paints);
+                    });
+                    if show == 0 {
+                        assert!(elapsed >= std::time::Duration::from_millis(40));
+                    }
+                    assert!(!GetUpdateRect(scene.hwnd, None, false).as_bool());
+                    assert_eq!(presentation_cloak(scene.hwnd) & 1, 0);
+                    let _ = ShowWindow(scene.hwnd, SW_HIDE);
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn autostart_tray_retries_stay_hidden_until_the_user_opens_the_window() {
     unsafe {

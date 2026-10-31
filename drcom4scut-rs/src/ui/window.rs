@@ -43,6 +43,8 @@ use super::layout;
 mod animation_render_tests;
 #[path = "display.rs"]
 mod display;
+#[path = "presentation.rs"]
+mod presentation;
 #[path = "v3.rs"]
 mod v3;
 use super::tray::Tray;
@@ -373,7 +375,7 @@ pub fn create_main_window() -> Option<HWND> {
 
 unsafe fn show_initial_window(hwnd: HWND) {
     if app_mut(hwnd).is_some_and(|app| !app.silent_start) {
-        let _ = ShowWindow(hwnd, SW_SHOW);
+        presentation::show(hwnd, SW_SHOW);
     }
 }
 
@@ -381,8 +383,12 @@ unsafe fn open_main_window(hwnd: HWND) {
     if let Some(app) = app_mut(hwnd) {
         app.silent_start = false;
     }
-    let _ = ShowWindow(hwnd, SW_RESTORE);
-    let _ = ShowWindow(hwnd, SW_SHOW);
+    let command = if windows::Win32::UI::WindowsAndMessaging::IsIconic(hwnd).as_bool() {
+        SW_RESTORE
+    } else {
+        SW_SHOW
+    };
+    presentation::show(hwnd, command);
     let _ = SetForegroundWindow(hwnd);
 }
 
@@ -2242,7 +2248,7 @@ unsafe fn maintain_tray(hwnd: HWND) {
     if app_mut(hwnd).is_some_and(|app| app.tray.is_none() && !app.silent_start)
         && !IsWindowVisible(hwnd).as_bool()
     {
-        let _ = ShowWindow(hwnd, SW_SHOWNA);
+        presentation::show(hwnd, SW_SHOWNA);
     }
 }
 
@@ -2286,7 +2292,7 @@ unsafe fn request_close(hwnd: HWND) {
             let _ = ShowWindow(hwnd, SW_HIDE);
         }
         CloseBehavior::KeepVisible => {
-            let _ = ShowWindow(hwnd, SW_SHOW);
+            presentation::show(hwnd, SW_SHOW);
             if !app.preview {
                 let _ = MessageBoxW(
                     Some(hwnd),
