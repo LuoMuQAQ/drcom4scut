@@ -59,4 +59,10 @@
 
 每代 UDP 独立 EAP inbox，缓存重放与发布同步；STOP/SLEEP/QUIT 和 EAP 失败/退出使缓存失效。UDP owner 直接接收通知，移除旧 EAPtoUDP 线程；清理旧 checksum、单调超时与取消、Drop 唤醒及空闲线程退出。13 项离线测试通过，真实联网恢复待验证，Windows10022 底层原因未确定。
 
-维护源码及详细补丁见 `vendor/drcom4scut-0.3.2/PATCHES.md`。`build-core.ps1` 默认生成 native 资源并校验上述哈希。
+维护源码及详细补丁见 `vendor/drcom4scut-0.3.2/PATCHES.md`。`build-core.ps1` 在该版默认生成 native 资源并校验该版哈希。
+
+## 7. Windows GUI 0.3.9 内嵌核心
+
+EAP/UDP 空闲等待改为事件驱动，保留 10 ms 工作线程检查兜底；不改抓包驱动或认证报文。核心自身版本仍为 `0.3.2`。
+
+本版 native GUI 内嵌核心 SHA-256：`5c3939f67af205f4671fba2d6d0272b61ec1bfc70df5738c00afacbb564a4404`。

@@ -33,7 +33,7 @@ use windows::core::{PCWSTR, PWSTR};
 use crate::paths;
 
 /// 嵌入核心的 SHA-256（十六进制小写）。
-pub const CORE_SHA256: &str = "e571bf8b366db40c43a0b4e17e8faaafe2088c242ede4856995965b2868d5083";
+pub const CORE_SHA256: &str = "5c3939f67af205f4671fba2d6d0272b61ec1bfc70df5738c00afacbb564a4404";
 
 /// 嵌入的核心可执行文件字节（编译期校验哈希，见 `ensure_core_extracted_to`）。
 pub const CORE_BYTES: &[u8] = include_bytes!("../resources/drcom4scut.exe");

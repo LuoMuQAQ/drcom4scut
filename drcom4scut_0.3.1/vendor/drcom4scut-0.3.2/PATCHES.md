@@ -21,7 +21,7 @@ The GUI uses the environment variables and does not pass credentials as process 
 
 The root `build-core.ps1` now defaults to the native GUI resource, checks the built binary before replacing it, and retains the SDK/build cache. Pass `-Destination` for another target. Historical .NET embedded binaries are not replaced by default.
 
-## Source-only candidate: event-driven idle wait
+## Windows GUI v0.3.9: event-driven idle wait
 
 - The EAP and UDP process loops wait for readiness rather than yielding and sleeping repeatedly. Existing packet and control handling order, retry counters, and log messages are unchanged. A 10 ms fallback still checks unexpected worker exits.
-- This change is not in the embedded `drcom4scut.exe`. The expected hash and GUI resource still identify the previous build; the default build script will reject a different hash. Do not update the hash or replace that resource until real-network regression testing is complete.
+- Included in the embedded Windows v0.3.9 core. The core version remains 0.3.2; see the pinned binary hash in `build-core.ps1` and the GUI build documentation. Real-network reconnection, resume and CPU measurements remain unverified.
