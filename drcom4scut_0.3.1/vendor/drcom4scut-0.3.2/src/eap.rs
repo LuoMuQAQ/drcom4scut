@@ -15,7 +15,7 @@ use pnet::datalink::MacAddr;
 use crate::device::Device;
 use crate::eap::packet::*;
 use crate::settings::Settings;
-use crate::util::{ChannelData, State, ip_to_vec, sleep};
+use crate::util::{ChannelData, IdleWait, State, ip_to_vec, set_and_wake};
 
 mod packet;
 pub(crate) use packet::logoff_frame;
@@ -49,6 +49,7 @@ pub struct Process<'a> {
     stop: Arc<AtomicBool>,
     quit: Arc<AtomicBool>,
     data: ProcessData,
+    idle_wait: IdleWait,
     receive_channel: Option<Receiver<Vec<u8>>>,
     send_channel: Option<Sender<(Vec<u8>, bool)>>,
     send_ts: Arc<AtomicI64>,
@@ -77,6 +78,7 @@ impl Process<'_> {
             quit: Arc::new(AtomicBool::new(false)),
             settings,
             device,
+            idle_wait: IdleWait::new(),
             receive_channel: None,
             send_channel: None,
             send_ts: Arc::new(AtomicI64::new(0)),
@@ -95,6 +97,7 @@ impl Process<'_> {
         }
         let (tx, rx) = unbounded::<Vec<u8>>();
         self.receive_channel = Some(rx);
+        let wake = self.idle_wait.notifier();
         let quit = self.quit.clone();
         let stop = self.stop.clone();
         let count = self.settings.retry.count;
@@ -119,14 +122,14 @@ impl Process<'_> {
                                 cnt = 0;
                                 if tx.send(v).is_err() {
                                     error!("Unexpected! Receive channel is disconnected!");
-                                    quit.store(true, Ordering::Release);
+                                    set_and_wake(&quit, &wake);
                                 }
                             }
                             Err(e) => {
                                 error!("Receive error: {e}");
                                 cnt += 1;
                                 if cnt > count {
-                                    quit.store(true, Ordering::Release);
+                                    set_and_wake(&quit, &wake);
                                 } else {
                                     thread::sleep(duration);
                                 }
@@ -148,6 +151,7 @@ impl Process<'_> {
         }
         let (tx, rx) = unbounded::<(Vec<u8>, bool)>();
         self.send_channel = Some(tx.clone());
+        let wake = self.idle_wait.notifier();
         let quit = self.quit.clone();
         let stop = self.stop.clone();
         let interval = self.settings.retry.interval;
@@ -178,7 +182,7 @@ impl Process<'_> {
                             cancel_resend.store(true, Ordering::Release);
                             if tx.send((Vec::new(), true)).is_err() {
                                 error!("Unexpected! Send channel is disconnected!");
-                                quit.store(true, Ordering::Release);
+                                set_and_wake(&quit, &wake);
                             }
                         } else {
                             // wait_ts <= -interval: system slept or clock jumped,
@@ -189,7 +193,7 @@ impl Process<'_> {
                             cancel_resend.store(true, Ordering::Release);
                             if tx.send((Vec::new(), true)).is_err() {
                                 error!("Unexpected! Send channel is disconnected!");
-                                quit.store(true, Ordering::Release);
+                                set_and_wake(&quit, &wake);
                             }
                         }
                     }
@@ -197,6 +201,7 @@ impl Process<'_> {
                 .expect("Can't create EAP-ReSender thread."),
         );
         self.resender_handle = Some(resender_handle.clone());
+        let wake = self.idle_wait.notifier();
         let quit = self.quit.clone();
         let stop = self.stop.clone();
         let device = self.device.clone();
@@ -228,7 +233,7 @@ impl Process<'_> {
                                 }
                             }
                             Err(_) => {
-                                quit.store(true, Ordering::Release);
+                                set_and_wake(&quit, &wake);
                                 error!("Unexpected! Send channel is disconnected!");
                                 continue;
                             }
@@ -253,7 +258,7 @@ impl Process<'_> {
                                     error!("Send error: {e}");
                                     cnt += 1;
                                     if cnt > count {
-                                        quit.store(true, Ordering::Release);
+                                        set_and_wake(&quit, &wake);
                                     } else {
                                         thread::sleep(duration);
                                     }
@@ -306,8 +311,8 @@ impl Process<'_> {
         self.start_send_thread();
         self.login_start();
         let mut ret = false;
-        while !self.stop.load(Ordering::Relaxed) {
-            if self.quit.load(Ordering::Relaxed) {
+        while !self.stop.load(Ordering::Acquire) {
+            if self.quit.load(Ordering::Acquire) {
                 debug!("EAP-Process thread quit!");
                 if let Err(e) = self.tx.try_send(ChannelData {
                     state: State::Quit,
@@ -330,7 +335,10 @@ impl Process<'_> {
             let raw = match self.receive() {
                 Some(v) => v,
                 None => {
-                    sleep();
+                    if !self.quit.load(Ordering::Acquire) && !self.stop.load(Ordering::Acquire) {
+                        self.idle_wait
+                            .wait(self.receive_channel.as_ref().unwrap(), None);
+                    }
                     continue;
                 }
             };
@@ -543,6 +551,7 @@ impl Process<'_> {
             handle.thread().unpark();
             return;
         }
+        let wake = self.idle_wait.notifier();
         let quit = self.quit.clone();
         let stop = self.stop.clone();
         let timeout = self.timeout.clone();
@@ -569,7 +578,7 @@ impl Process<'_> {
                                 "Heartbeat timeout! No Request, Identity packet received for {}s.",
                                 eap_timeout * cnt as i32
                             );
-                            stop.store(true, Ordering::Release);
+                            set_and_wake(&stop, &wake);
                             if tx
                                 .send(ChannelData {
                                     state: State::Stop,
@@ -578,7 +587,7 @@ impl Process<'_> {
                                 .is_err()
                             {
                                 error!("Can't send STOP message to UDP receiver.");
-                                quit.store(true, Ordering::Release);
+                                set_and_wake(&quit, &wake);
                                 continue;
                             }
                         }

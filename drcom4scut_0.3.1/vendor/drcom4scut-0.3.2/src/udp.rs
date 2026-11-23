@@ -17,7 +17,7 @@ use crate::udp::packet::{
     Alive, HeaderType, HeartbeatType, MiscAlive, MiscHeartbeat1, MiscHeartbeat3, MiscInfo,
     decrypt_info,
 };
-use crate::util::{ChannelData, State, random_vec, sleep};
+use crate::util::{ChannelData, IdleWait, State, random_vec, set_and_wake};
 
 mod packet;
 
@@ -59,6 +59,7 @@ pub struct Process<'a> {
     quit: Arc<AtomicBool>,
     sleep: Arc<AtomicBool>,
     data: Arc<RwLock<ProcessData>>,
+    idle_wait: IdleWait,
     receive_channel: Option<Receiver<Vec<u8>>>,
     send_channel: Option<Sender<(Vec<u8>, bool)>>,
     send_ts: Arc<AtomicI64>,
@@ -85,6 +86,7 @@ impl<'a> Process<'a> {
             quit: Arc::new(AtomicBool::new(false)),
             sleep: Arc::new(AtomicBool::new(false)),
             data: Arc::new(RwLock::new(ProcessData::default())),
+            idle_wait: IdleWait::new(),
             receive_channel: None,
             send_channel: None,
             send_ts: Arc::new(AtomicI64::new(0)),
@@ -109,6 +111,7 @@ impl<'a> Process<'a> {
         }
         let (tx, rx) = unbounded::<Vec<u8>>();
         self.receive_channel = Some(rx);
+        let wake = self.idle_wait.notifier();
         let quit = self.quit.clone();
         let stop = self.stop.clone();
         let count = self.settings.retry.count;
@@ -133,7 +136,7 @@ impl<'a> Process<'a> {
                         // 检查 Socket 有效性
                         if consecutive_errors > 5 && !socket.is_valid() {
                             error!("UDP Socket appears invalid, signaling quit.");
-                            quit.store(true, Ordering::Release);
+                            set_and_wake(&quit, &wake);
                             return;
                         }
                         match socket.receive() {
@@ -142,7 +145,7 @@ impl<'a> Process<'a> {
                                 consecutive_errors = 0;
                                 if tx.send(v).is_err() {
                                     error!("Unexpected! Receive channel is disconnected!");
-                                    quit.store(true, Ordering::Release);
+                                    set_and_wake(&quit, &wake);
                                 }
                             }
                             Err(e)
@@ -161,7 +164,7 @@ impl<'a> Process<'a> {
                                 cnt += 1;
                                 consecutive_errors += 1;
                                 if cnt > count {
-                                    quit.store(true, Ordering::Release);
+                                    set_and_wake(&quit, &wake);
                                 } else {
                                     thread::sleep(duration);
                                 }
@@ -183,6 +186,7 @@ impl<'a> Process<'a> {
         }
         let (tx, rx) = unbounded::<(Vec<u8>, bool)>();
         self.send_channel = Some(tx.clone());
+        let wake = self.idle_wait.notifier();
         let quit = self.quit.clone();
         let stop = self.stop.clone();
         let interval = self.settings.retry.interval;
@@ -220,7 +224,7 @@ impl<'a> Process<'a> {
                             cancel_resend.store(true, Ordering::Release);
                             if tx.send((Vec::new(), true)).is_err() {
                                 error!("Unexpected! Send channel is disconnected!");
-                                quit.store(true, Ordering::Release);
+                                set_and_wake(&quit, &wake);
                             }
                         } else {
                             // wait_ts <= -interval: system slept or clock jumped,
@@ -231,7 +235,7 @@ impl<'a> Process<'a> {
                             cancel_resend.store(true, Ordering::Release);
                             if tx.send((Vec::new(), true)).is_err() {
                                 error!("Unexpected! Send channel is disconnected!");
-                                quit.store(true, Ordering::Release);
+                                set_and_wake(&quit, &wake);
                             }
                         }
                     }
@@ -239,6 +243,7 @@ impl<'a> Process<'a> {
                 .expect("Can't create UDP-ReSender thread."),
         );
         self.resender_handle = Some(resender_handle.clone());
+        let wake = self.idle_wait.notifier();
         let quit = self.quit.clone();
         let stop = self.stop.clone();
         let socket = self.socket.clone();
@@ -275,7 +280,7 @@ impl<'a> Process<'a> {
                                 if quit.load(Ordering::Acquire) {
                                     return;
                                 }
-                                quit.store(true, Ordering::Release);
+                                set_and_wake(&quit, &wake);
                                 error!("Unexpected! Send channel is disconnected!");
                                 continue;
                             }
@@ -300,7 +305,7 @@ impl<'a> Process<'a> {
                                     error!("Send error: {e}");
                                     cnt += 1;
                                     if cnt > count {
-                                        quit.store(true, Ordering::Release);
+                                        set_and_wake(&quit, &wake);
                                     } else {
                                         thread::sleep(duration);
                                     }
@@ -394,9 +399,9 @@ impl<'a> Process<'a> {
         self.start_receive_thread();
         self.start_send_thread();
         self.login_start();
-        while !self.stop.load(Ordering::Relaxed) {
+        while !self.stop.load(Ordering::Acquire) {
             self.poll_eap();
-            if self.quit.load(Ordering::Relaxed) {
+            if self.quit.load(Ordering::Acquire) {
                 debug!("UDP-Process thread quit!");
                 return State::Quit;
             }
@@ -429,7 +434,10 @@ impl<'a> Process<'a> {
             let raw = match self.receive() {
                 Some(v) => v,
                 None => {
-                    sleep();
+                    if !self.quit.load(Ordering::Acquire) && !self.stop.load(Ordering::Acquire) {
+                        self.idle_wait
+                            .wait(self.receive_channel.as_ref().unwrap(), Some(&self.rx));
+                    }
                     continue;
                 }
             };
@@ -579,6 +587,7 @@ impl<'a> Process<'a> {
             handle.thread().unpark();
             return;
         }
+        let wake = self.idle_wait.notifier();
         let quit = self.quit.clone();
         let stop = self.stop.clone();
         let alive = self.alive.clone();
@@ -596,12 +605,12 @@ impl<'a> Process<'a> {
                     thread::park();
                     continue;
                 }
-                alive.store(true, Ordering::Release);
+                set_and_wake(&alive, &wake);
                 thread::sleep(duration);
                 let cnt = timeout.load(Ordering::Relaxed);
                 if cnt > count {
                     error!("Heartbeat timeout. No Misc Heartbeat packet received for {}s. Restarting UDP process.", udp_timeout * cnt as i32);
-                    quit.store(true, Ordering::Release);
+                    set_and_wake(&quit, &wake);
                     return;
                 }
                 timeout.store(cnt + 1, Ordering::Release);
@@ -824,6 +833,58 @@ mod reconnect_tests {
                 _ => unreachable!(),
             }
         }
+    }
+
+    #[test]
+    fn queued_stop_precedes_udp_packet_and_pending_heartbeat_after_login() {
+        let settings = Settings::default();
+        let (control, rx) = unbounded();
+        let (mut udp, _) = fixture(&settings, rx);
+        // Stand in for the network workers: use only in-memory packet queues.
+        // The login send is a rendezvous, so all three inputs are ready before
+        // the owner starts its data loop.
+        let (packet_tx, packet_rx) = unbounded();
+        udp.receive_channel = Some(packet_rx);
+        let (send, outgoing) = crossbeam_channel::bounded(0);
+        udp.send_channel = Some(send);
+        let (finish_worker, worker_wait) = unbounded::<()>();
+        let worker = Arc::new(thread::spawn(move || {
+            let _ = worker_wait.recv();
+        }));
+        udp.receiver_handle = Some(worker.clone());
+        udp.resender_handle = Some(worker.clone());
+        udp.sender_handle = Some(worker);
+        control.send(success(1)).unwrap();
+        let alive = udp.alive.clone();
+        let wake = udp.idle_wait.notifier();
+
+        thread::scope(|scope| {
+            scope.spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                // An operation is not available on a rendezvous receiver
+                // without a sender. Wait for login_start's send *without*
+                // accepting it, so its initial alive reset has happened.
+                let mut select = crossbeam_channel::Select::new();
+                select.recv(&outgoing);
+                select.ready_deadline(deadline).unwrap();
+                control
+                    .send(ChannelData {
+                        state: State::Stop,
+                        data: vec![],
+                    })
+                    .unwrap();
+                packet_tx.send(vec![1, 2, 3]).unwrap();
+                set_and_wake(&alive, &wake);
+                assert!(outgoing.recv_deadline(deadline).unwrap().1);
+            });
+            assert!(matches!(udp.start(), State::Stop));
+            assert!(udp.alive.load(Ordering::Acquire));
+            assert_eq!(
+                udp.receive_channel.as_ref().unwrap().try_recv().unwrap(),
+                vec![1, 2, 3]
+            );
+        });
+        drop(finish_worker);
     }
 
     #[test]

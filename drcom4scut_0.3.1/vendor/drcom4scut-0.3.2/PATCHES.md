@@ -20,3 +20,8 @@ The GUI uses the environment variables and does not pass credentials as process 
 - Windows error 10022 remains an unproven network/socket cause. This addresses the demonstrated recovery race, not every source of disconnects.
 
 The root `build-core.ps1` now defaults to the native GUI resource, checks the built binary before replacing it, and retains the SDK/build cache. Pass `-Destination` for another target. Historical .NET embedded binaries are not replaced by default.
+
+## Source-only candidate: event-driven idle wait
+
+- The EAP and UDP process loops wait for readiness rather than yielding and sleeping repeatedly. Existing packet and control handling order, retry counters, and log messages are unchanged. A 10 ms fallback still checks unexpected worker exits.
+- This change is not in the embedded `drcom4scut.exe`. The expected hash and GUI resource still identify the previous build; the default build script will reject a different hash. Do not update the hash or replace that resource until real-network regression testing is complete.
