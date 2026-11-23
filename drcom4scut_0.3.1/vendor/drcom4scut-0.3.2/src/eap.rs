@@ -117,12 +117,14 @@ impl Process<'_> {
                         if stop.load(Ordering::Relaxed) {
                             thread::park();
                         }
-                        match device.receive() {
-                            Ok(v) => {
+                        match device.receive_eapol() {
+                            Ok(frame) => {
                                 cnt = 0;
-                                if tx.send(v).is_err() {
-                                    error!("Unexpected! Receive channel is disconnected!");
-                                    set_and_wake(&quit, &wake);
+                                if let Some(v) = frame {
+                                    if tx.send(v).is_err() {
+                                        error!("Unexpected! Receive channel is disconnected!");
+                                        set_and_wake(&quit, &wake);
+                                    }
                                 }
                             }
                             Err(e) => {

@@ -25,3 +25,9 @@ The root `build-core.ps1` now defaults to the native GUI resource, checks the bu
 
 - The EAP and UDP process loops wait for readiness rather than yielding and sleeping repeatedly. Existing packet and control handling order, retry counters, and log messages are unchanged. A 10 ms fallback still checks unexpected worker exits.
 - Included in the embedded Windows v0.3.9 core. The core version remains 0.3.2; see the pinned binary hash in `build-core.ps1` and the GUI build documentation. Real-network reconnection, resume and CPU measurements remain unverified.
+
+## Windows GUI v0.3.9 package refresh: EAP receive filtering
+
+- Check the outer Ethernet type on the borrowed receive buffer; only `0x888e` frames are copied and queued to EAP. This matches the previous accept gate and does not add VLAN support. The destination address and full EAP checks remain downstream.
+- A filtered frame is a successful read. Reset the consecutive receive-error counter and return to the worker lifecycle checks after every frame. Driver reads, retry behavior, all UDP logic and the independent EAPOL-Logoff sender are unchanged.
+- Includes production tests with a fake data-link receiver for one read per iteration, short and VLAN frames, raw EAPOL preservation and timeout propagation. The public package does not include diagnostic control switches or BPF.

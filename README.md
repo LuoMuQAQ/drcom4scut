@@ -60,7 +60,7 @@ Windows GUI / 安装包的公开版本号从 **0.3.1** 开始，与上游最新 
 
 内嵌认证核心基于上游提交 `ef20ae5c71744eb9e096f5e586713490ba01f4ee`（核心自身版本 0.3.2），在上游之外加入环境变量凭据、移除密码日志，以及 GUI 退出时发送 EAPOL-Logoff 并随 GUI 结束。核心保持真实版本号，与 GUI 的发行版本独立；见 `drcom4scut_0.3.1/vendor/drcom4scut-0.3.2/PATCHES.md`。
 
-本次 0.3.9 的对应源码为 [windows-v0.3.9](https://github.com/LuoMuQAQ/drcom4scut/tree/windows-v0.3.9)，可直接使用该 Release 的源码附件或 GitHub 自动生成的 Source code。
+本次 0.3.9 更新后的安装包对应 [windows-v0.3.9-appfilter](https://github.com/LuoMuQAQ/drcom4scut/tree/windows-v0.3.9-appfilter)，也可使用该 Release 的 `drcom4scut-Source-0.3.9.zip` 附件。原 `windows-v0.3.9` 标签保持不变；GitHub 自动生成的 Source code 仍对应初版。
 
 ## 构建
 
@@ -77,7 +77,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\publish-portable.ps1
 
 临时目录含非 ASCII 字符时，向发布脚本传入 `-BuildDirectory C:\drcom-build -PayloadDirectory C:\drcom-payload`。安装包在 `drcom4scut-rs/release/setup`，GUI 和便携 ZIP 在 `drcom4scut-rs/release`。内嵌核心的对应源码和可复现构建说明见 `drcom4scut-rs/BUILD.txt`。
 
-本轮新增核心空闲等待回归，覆盖报文与通知唤醒、信号合并、通道断开和 UDP 停止通知优先级。实际 CPU 降幅、真实校园网断线恢复、睡眠唤醒和长期稳定性仍待实机验证；Windows 10022 的底层原因尚未确定。发行 EXE 未代码签名。
+除核心空闲等待回归外，新增外层 EAPOL 提前过滤测试，覆盖短帧、普通帧、VLAN、原有 EAPOL 处理及读取错误传递。同机限速 3.5 MiB/s 的在线 A/B 诊断测试中，两组匹配窗口的核心 CPU 分别降低约 64% 和 65%，并未减少 Npcap 读取。该测试不验证发行构建从零首次认证、网卡重启或睡眠唤醒。Windows 10022 的底层原因尚未确定。发行 EXE 未代码签名。
 
 ## 许可证
 

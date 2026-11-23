@@ -159,15 +159,85 @@ impl Device {
             if attempts >= MAX_ATTEMPTS {
                 return Err(Error::new(
                     ErrorKind::TimedOut,
-                    format!("Send buffer busy after {} attempts", MAX_ATTEMPTS)
+                    format!("Send buffer busy after {} attempts", MAX_ATTEMPTS),
                 ));
             }
             std::thread::sleep(std::time::Duration::from_micros(100));
         }
     }
 
-    pub fn receive(&self) -> Result<Vec<u8>> {
-        Ok(self.receiver.borrow_mut().next()?.to_vec())
+    pub fn receive_eapol(&self) -> Result<Option<Vec<u8>>> {
+        receive_eapol_frame(self.receiver.borrow_mut().as_mut())
+    }
+}
+
+// Match the existing EAP loop's outer Ethernet type gate before copying the frame.
+// Read exactly once so the caller keeps checking stop and quit on ordinary traffic.
+fn receive_eapol_frame(receiver: &mut dyn DataLinkReceiver) -> Result<Option<Vec<u8>>> {
+    let frame = receiver.next()?;
+    Ok((frame.get(12..14) == Some(&[0x88, 0x8e])).then(|| frame.to_vec()))
+}
+
+#[cfg(test)]
+mod receive_tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    #[derive(Default)]
+    struct Receiver {
+        frames: VecDeque<Result<Vec<u8>>>,
+        current: Vec<u8>,
+        calls: usize,
+    }
+
+    impl DataLinkReceiver for Receiver {
+        fn next(&mut self) -> Result<&[u8]> {
+            self.calls += 1;
+            self.current = self
+                .frames
+                .pop_front()
+                .expect("one next call per iteration")?;
+            Ok(&self.current)
+        }
+    }
+
+    #[test]
+    fn skips_runt_ordinary_and_vlan_frames_without_draining() {
+        let mut receiver = Receiver::default();
+        receiver.frames.extend((0..14).map(|n| Ok(vec![0x88; n])));
+        let mut ordinary = vec![0; 18];
+        ordinary[12..14].copy_from_slice(&[0x08, 0x00]);
+        receiver.frames.push_back(Ok(ordinary));
+        let mut vlan = vec![0; 18];
+        vlan[12..14].copy_from_slice(&[0x81, 0x00]);
+        vlan[16..18].copy_from_slice(&[0x88, 0x8e]);
+        receiver.frames.push_back(Ok(vlan));
+        for calls in 1..=16 {
+            assert_eq!(receive_eapol_frame(&mut receiver).unwrap(), None);
+            assert_eq!(receiver.calls, calls);
+        }
+    }
+
+    #[test]
+    fn forwards_raw_outer_eapol_and_preserves_driver_errors() {
+        let mut receiver = Receiver::default();
+        let mut eapol = vec![0x5a; 64];
+        eapol[12..14].copy_from_slice(&[0x88, 0x8e]);
+        // Even a frame with no EAPOL payload must reach the original length checks.
+        receiver.frames.push_back(Ok(eapol[..14].to_vec()));
+        receiver.frames.push_back(Ok(eapol.clone()));
+        receiver
+            .frames
+            .push_back(Err(Error::new(ErrorKind::TimedOut, "read timeout")));
+        assert_eq!(
+            receive_eapol_frame(&mut receiver).unwrap().unwrap(),
+            eapol[..14]
+        );
+        assert_eq!(receive_eapol_frame(&mut receiver).unwrap(), Some(eapol));
+        let err = receive_eapol_frame(&mut receiver).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::TimedOut);
+        assert_eq!(err.to_string(), "read timeout");
+        assert_eq!(receiver.calls, 3);
     }
 }
 

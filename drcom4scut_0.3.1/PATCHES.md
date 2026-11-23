@@ -63,6 +63,6 @@
 
 ## 7. Windows GUI 0.3.9 内嵌核心
 
-EAP/UDP 空闲等待改为事件驱动，保留 10 ms 工作线程检查兜底；不改抓包驱动或认证报文。核心自身版本仍为 `0.3.2`。
+EAP/UDP 空闲等待改为事件驱动，保留 10 ms 工作线程检查兜底。更新包在 EAP 接收线程提前跳过非外层 EAPOL；不改驱动、认证报文、GUI 日志判定或 Logoff。核心自身版本仍为 `0.3.2`。
 
-本版 native GUI 内嵌核心 SHA-256：`5c3939f67af205f4671fba2d6d0272b61ec1bfc70df5738c00afacbb564a4404`。
+本版 native GUI 内嵌核心 SHA-256：`ac790ca75ee97366096d6e45b129a18e8b5cdc726c28eefef17c7608bb7aff32`。
