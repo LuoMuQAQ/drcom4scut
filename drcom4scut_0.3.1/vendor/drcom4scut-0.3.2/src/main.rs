@@ -3,6 +3,8 @@ mod device;
 mod eap;
 mod eap_relay;
 mod logger;
+#[cfg(windows)]
+mod npcap;
 mod settings;
 mod socket;
 mod supervisor;

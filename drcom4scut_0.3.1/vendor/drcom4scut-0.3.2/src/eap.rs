@@ -322,6 +322,7 @@ impl Process<'_> {
                 }) {
                     error!("Can't send STOP message to UDP receiver. {e}");
                 }
+                self.device.wake_receiver();
                 return State::Quit;
             }
             // Health check: a worker thread that finished without quit being
@@ -426,6 +427,7 @@ impl Process<'_> {
                 ),
             }
         }
+        self.device.wake_receiver();
         if ret { State::Sleep } else { State::Stop }
     }
 
@@ -697,6 +699,13 @@ impl Process<'_> {
         data.put(payload);
         self.send(data.to_vec(), true)
         // Success
+    }
+}
+
+impl Drop for Process<'_> {
+    fn drop(&mut self) {
+        self.quit.store(true, Ordering::Release);
+        self.device.wake_receiver();
     }
 }
 

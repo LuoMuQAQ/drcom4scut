@@ -1,5 +1,14 @@
 # 更新日志 (CHANGELOG)
 
+## [0.3.10] - 2026-11-24（Npcap 内核 cBPF + 事件驱动读）
+
+- Windows 接收通道在 Npcap 内核安装 8 条 cBPF，只放行外层 `0x888e` 且目的 MAC 为本机的帧；禁用 NPF 回环，固定 64 KiB 内核/读缓冲与 `PacketSetMinToCopy(1)`。
+- 内核过滤成功且驱动读事件可用时使用 `PacketSetReadTimeout(-1)` + `PacketGetReadEvent` 等待；超时不再调用 `PacketReceivePacket`。驱动拒绝 cBPF、缺少读事件或 -1 超时不可用时自动回退 250 ms 直接读，应用层 `0x888e` 过滤保留。
+- `Device::wake_receiver` 在 EAP 停止、退出和 `Drop` 时唤醒接收线程，避免停止时泄漏 Npcap 句柄。
+- 本机 100 Mbps、单连接限速 3.5 MiB/s 的 A1/B1/B2/A2 各 60 秒 ABBA：NPF 读取降幅 ≥99.999%，读字节降幅 ≥99.9999%，`bs_capt` 降幅 ≥99.999%，`bs_drop` 均为 0；核心单核 CPU 分别降低 92.4% 和 95.2%。
+- 90 秒冷启动验收：首次认证 7.33 秒，回复 2 次 EAP Heartbeat(Response, Identity)，诊断退出码 0，正式 GUI/HTTPS 已恢复。该窗口未观察到 UDP `Heartbeat done.`，不作硬性结论。
+- Windows 安装包版本 0.3.10，对应源码标签 `windows-v0.3.10`；内嵌核心仍为 `drcom4scut 0.3.2`，SHA-256 见 `drcom4scut-rs/BUILD.txt`。
+
 ## [0.3.9] - 2026-11-23（应用层提前过滤更新）
 
 - EAP 接收线程在复制和跨线程投递前跳过原本就会丢弃的非外层 EAPOL 帧；原认证检查、驱动配置、UDP 心跳与退出下线逻辑保持原样。

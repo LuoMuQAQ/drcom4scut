@@ -1,12 +1,12 @@
-# drcom4scut Windows GUI 0.3.9
+# drcom4scut Windows GUI 0.3.10
 
 基于 [SeaLoong/drcom4scut](https://github.com/SeaLoong/drcom4scut) 的 Windows 原生图形客户端，使用 Rust / Win32 编写。本项目是独立维护的 GUI fork，感谢原作者提供认证核心。
 
 ## 下载和安装
 
-前往 [Releases](https://github.com/LuoMuQAQ/drcom4scut/releases/latest)，下载 **drcom4scut-Setup-0.3.9.exe** 安装版。默认安装到 64 位 Program Files，可自行选择本地目录；已安装时在原目录覆盖升级。
+前往 [Releases](https://github.com/LuoMuQAQ/drcom4scut/releases/latest)，下载 **drcom4scut-Setup-0.3.10.exe** 安装版。默认安装到 64 位 Program Files，可自行选择本地目录；已安装时在原目录覆盖升级。
 
-也提供 **drcom4scut-Portable-0.3.9-win-x64.zip** 便携版，完整解压后运行 `drcom4scutGUI.exe`，需要系统已有兼容 x64 Npcap / WinPcap 驱动。便携模式数据位于 `%LOCALAPPDATA%/drcom4scutGUI`，不会随解压目录移动。
+也提供 **drcom4scut-Portable-0.3.10-win-x64.zip** 便携版，完整解压后运行 `drcom4scutGUI.exe`，需要系统已有兼容 x64 Npcap / WinPcap 驱动。便携模式数据位于 `%LOCALAPPDATA%/drcom4scutGUI`，不会随解压目录移动。
 
 安装器自动检测兼容 x64 Npcap / WinPcap。缺少时从官网下载 Npcap 1.88，核验 SHA-256 与 Authenticode 后启动官方安装窗口。免费 Npcap 需要在官方窗口确认许可和安装，不能全静默安装；本项目不内嵌或再分发 Npcap 安装包。
 
@@ -15,7 +15,7 @@
 在**管理员 PowerShell** 中执行。终端模式需要系统已有兼容的 x64 Npcap / WinPcap，缺少时返回错误，使用不带参数的图形安装器安装驱动即可。
 
 ```powershell
-$p = Start-Process -FilePath .\drcom4scut-Setup-0.3.9.exe `
+$p = Start-Process -FilePath .\drcom4scut-Setup-0.3.10.exe `
     -ArgumentList '--install --json' -PassThru `
     -RedirectStandardOutput .\install-result.json
 $p.WaitForExit()
@@ -42,6 +42,7 @@ Get-Content .\install-result.json
 - HeroUI v3 风格的原生中文界面，保留原版 logo；主窗口、安装/卸载统一内嵌 Noto Sans SC 字体。
 - 仅账号、密码输入框显示蓝色焦点框，点击空白处取消；连接按钮和输入框统一 12 DIP 圆角。
 - EAP/UDP 主循环在空闲时阻塞等待事件，收到报文或通知即唤醒；保留现有处理优先级和 10 ms 的工作线程检查兜底。
+- Windows 接收通道在 Npcap 内核安装外层 EAPOL/目的 MAC cBPF，并等待驱动读事件；无报文时不再执行空读。驱动拒绝 cBPF、缺少读事件或 -1 超时不可用时自动回退到 250 ms 直接读，应用层仍保留外层 0x888e 过滤。
 - UDP 每代独立接收认证通知，失效状态清除成功缓存，修复重连消息竞争。
 - 开关滑动与网卡菜单淡入/滑入动画，采用局部重绘和菜单缓存，支持连续切换及高 DPI。
 - 运行时切换分辨率、系统缩放或显示器时，窗口、字体、输入框、图标和点击区域同步适配；小工作区整体缩放，恢复后回到正常尺寸。
@@ -56,11 +57,11 @@ Get-Content .\install-result.json
 
 ## 版本与来源
 
-Windows GUI / 安装包的公开版本号从 **0.3.1** 开始，与上游最新 Release 编号对齐。本次 Release 标记使用 **windows-v0.3.9**，避免与保留的上游 `v0.3.1` 标记混淆。
+Windows GUI / 安装包的公开版本号从 **0.3.1** 开始，与上游最新 Release 编号对齐。本次 Release 标记使用 **windows-v0.3.10**，避免与保留的上游 `v0.3.1` 标记混淆。
 
 内嵌认证核心基于上游提交 `ef20ae5c71744eb9e096f5e586713490ba01f4ee`（核心自身版本 0.3.2），在上游之外加入环境变量凭据、移除密码日志，以及 GUI 退出时发送 EAPOL-Logoff 并随 GUI 结束。核心保持真实版本号，与 GUI 的发行版本独立；见 `drcom4scut_0.3.1/vendor/drcom4scut-0.3.2/PATCHES.md`。
 
-本次 0.3.9 更新后的安装包对应 [windows-v0.3.9-appfilter](https://github.com/LuoMuQAQ/drcom4scut/tree/windows-v0.3.9-appfilter)，也可使用该 Release 的 `drcom4scut-Source-0.3.9.zip` 附件。原 `windows-v0.3.9` 标签保持不变；GitHub 自动生成的 Source code 仍对应初版。
+本次 0.3.10 更新后的安装包对应 [windows-v0.3.10](https://github.com/LuoMuQAQ/drcom4scut/tree/windows-v0.3.10)，也可使用该 Release 的 `drcom4scut-Source-0.3.10.zip` 附件。原 `windows-v0.3.9` 与 `windows-v0.3.9-appfilter` 标签保持不变；GitHub 自动生成的 Source code 仍对应初版。
 
 ## 构建
 
@@ -77,7 +78,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\publish-portable.ps1
 
 临时目录含非 ASCII 字符时，向发布脚本传入 `-BuildDirectory C:\drcom-build -PayloadDirectory C:\drcom-payload`。安装包在 `drcom4scut-rs/release/setup`，GUI 和便携 ZIP 在 `drcom4scut-rs/release`。内嵌核心的对应源码和可复现构建说明见 `drcom4scut-rs/BUILD.txt`。
 
-除核心空闲等待回归外，新增外层 EAPOL 提前过滤测试，覆盖短帧、普通帧、VLAN、原有 EAPOL 处理及读取错误传递。同机限速 3.5 MiB/s 的在线 A/B 诊断测试中，两组匹配窗口的核心 CPU 分别降低约 64% 和 65%，并未减少 Npcap 读取。该测试不验证发行构建从零首次认证、网卡重启或睡眠唤醒。Windows 10022 的底层原因尚未确定。发行 EXE 未代码签名。
+除核心空闲等待回归外，新增外层 EAPOL 提前过滤、内核 cBPF 与读事件回归，覆盖短帧、普通帧、VLAN、目的 MAC、畸形 `bpf_hdr`、中断唤醒及回退路径。2026-11-24 在本机 100 Mbps 有线网络、单连接限速 3.5 MiB/s 下完成 A1/B1/B2/A2 各 60 秒的在线 ABBA 实测：两组匹配窗口的 NPF 读取分别从 4089.7 次/秒降至 0、从 3775.5 次/秒降至约 0.02 次/秒（降幅 ≥99.999%），读字节从约 4.3 MiB/s 降至 0/约 0，`bs_capt` 从 216,903/196,671 降至 0/1，`bs_drop` 均为 0；核心单核 CPU 分别降低 92.4% 和 95.2%。同一构建的冷启动验收在 7.33 秒完成首次认证，90 秒观察窗内回复 2 次 EAP Heartbeat(Response, Identity)，退出码 0，正式 GUI/HTTPS 已恢复；该 90 秒窗口未观察到 UDP `Heartbeat done.`，不作硬性结论。该实测只代表本机本次网络与负载，不覆盖网卡重启或睡眠唤醒。Windows 10022 的底层原因尚未确定。发行 EXE 未代码签名。
 
 ## 许可证
 

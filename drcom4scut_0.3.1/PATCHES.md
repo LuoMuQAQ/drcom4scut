@@ -65,4 +65,18 @@
 
 EAP/UDP 空闲等待改为事件驱动，保留 10 ms 工作线程检查兜底。更新包在 EAP 接收线程提前跳过非外层 EAPOL；不改驱动、认证报文、GUI 日志判定或 Logoff。核心自身版本仍为 `0.3.2`。
 
-本版 native GUI 内嵌核心 SHA-256：`ac790ca75ee97366096d6e45b129a18e8b5cdc726c28eefef17c7608bb7aff32`。
+本版 native GUI 内嵌核心（v0.3.9-appfilter）SHA-256：`ac790ca75ee97366096d6e45b129a18e8b5cdc726c28eefef17c7608bb7aff32`。
+
+## 8. Npcap 内核 cBPF + 事件驱动读（2026-11-24）
+
+**位置：** `src/npcap.rs`（新增，仅 Windows）、`src/device.rs`、`src/eap.rs`、`src/main.rs`
+**目的：** 把 EAPOL 过滤下推到 Npcap 内核 cBPF，并用驱动读事件替代空读；应用层仍保留外层 `0x888e` 兜底。
+
+- Windows `Device::with_ip_net` 优先调用 `npcap::open_channel`：8 条 cBPF 只接受外层 `0x888e` 且目的 MAC 为本机的帧；`PacketSetBuff`、用户读缓冲和 `PacketSetMinToCopy(1)` 固定为 64 KiB / 1；`PacketSetHwFilter` 优先 `DIRECTED|MULTICAST`，失败回退 `PROMISCUOUS`。
+- 内核过滤安装成功时禁用 NPF 回环、`PacketSetReadTimeout(-1)`，接收线程等待 `PacketGetReadEvent`；超时只检查停止事件，不调用 `PacketReceivePacket`。`PacketGetReadEvent` 或 `PacketSetBpf` 不可用时记录 `warn!` 并回退到 250 ms 直接读与应用层过滤。
+- `Device::wake_receiver` 在 EAP 停止、退出和 `Drop` 时唤醒接收线程；`receive_eapol_frame` 将 `Interrupted` 映射为 `Ok(None)`，避免停止时泄漏 Npcap 句柄。
+- 认证报文、UDP 心跳、EAP 状态机、GUI 日志判定和正式 Logoff 路径不变；`PacketSetSnapLen` 不调用，截断长度由 BPF `RET #65535` 控制。
+- 离线单测覆盖 ABI、软 BPF（短帧/IPv4/VLAN/非本机目的 MAC/本机 EAPOL）、`bpf_hdr` 边界、超时状态和中断唤醒。2026-11-24 本机 A1/B1/B2/A2 各 60 秒 ABBA 与 90 秒冷启动验收已通过：NPF 读取降幅 ≥99.999%，读字节降幅 99.9999%，`bs_capt` 降幅 ≥99.999%，`bs_drop` 为 0，核心单核 CPU 分别降低 92.4% / 95.2%；冷启动首次认证 7.33 秒，回复 2 次 EAP 心跳，退出码 0。
+
+**发布版本：** Windows GUI 0.3.10（源码标签 `windows-v0.3.10`）
+本版 native GUI 内嵌核心 SHA-256：`21b56c6684ee6bcbf37e41479eaf999ff8d82afc5cc9adb1d5b57e3c2cc39b73`。

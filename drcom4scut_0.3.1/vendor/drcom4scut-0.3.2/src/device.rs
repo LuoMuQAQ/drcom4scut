@@ -113,6 +113,15 @@ impl Device {
                 ),
             ));
         }
+        #[cfg(windows)]
+        let ch = crate::npcap::open_channel(&interface, interface.mac.unwrap()).or_else(|err| {
+            log::warn!(
+                "Npcap optimized capture failed on {}: {err}; falling back to the standard channel",
+                interface.name
+            );
+            channel(&interface, Config::default())
+        });
+        #[cfg(not(windows))]
         let ch = channel(&interface, Config::default());
         match ch {
             Ok(Channel::Ethernet(tx, rx)) => Ok(Device {
@@ -169,12 +178,22 @@ impl Device {
     pub fn receive_eapol(&self) -> Result<Option<Vec<u8>>> {
         receive_eapol_frame(self.receiver.borrow_mut().as_mut())
     }
+
+    /// Wake a receive thread that is waiting on the kernel read event.
+    pub fn wake_receiver(&self) {
+        #[cfg(windows)]
+        crate::npcap::wake_receivers();
+    }
 }
 
 // Match the existing EAP loop's outer Ethernet type gate before copying the frame.
 // Read exactly once so the caller keeps checking stop and quit on ordinary traffic.
 fn receive_eapol_frame(receiver: &mut dyn DataLinkReceiver) -> Result<Option<Vec<u8>>> {
-    let frame = receiver.next()?;
+    let frame = match receiver.next() {
+        Ok(frame) => frame,
+        Err(err) if err.kind() == ErrorKind::Interrupted => return Ok(None),
+        Err(err) => return Err(err),
+    };
     Ok((frame.get(12..14) == Some(&[0x88, 0x8e])).then(|| frame.to_vec()))
 }
 
@@ -238,6 +257,16 @@ mod receive_tests {
         assert_eq!(err.kind(), ErrorKind::TimedOut);
         assert_eq!(err.to_string(), "read timeout");
         assert_eq!(receiver.calls, 3);
+    }
+
+    #[test]
+    fn interrupted_wake_returns_no_frame_without_error() {
+        let mut receiver = Receiver::default();
+        receiver
+            .frames
+            .push_back(Err(Error::new(ErrorKind::Interrupted, "wake")));
+        assert_eq!(receive_eapol_frame(&mut receiver).unwrap(), None);
+        assert_eq!(receiver.calls, 1);
     }
 }
 
